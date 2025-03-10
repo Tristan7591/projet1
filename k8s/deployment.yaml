@@ -1,0 +1,43 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: mon-application
+  namespace: default
+  labels:
+    app: mon-application
+spec:
+  replicas: 2
+  selector:
+    matchLabels:
+      app: mon-application
+  template:
+    metadata:
+      labels:
+        app: mon-application
+    spec:
+      containers:
+        - name: springboot-react-container
+          image: "xxxxxxxx.dkr.ecr.us-east-1.amazonaws.com/mon-application:latest"
+          ports:
+            - containerPort: 8080
+          env:
+            - name: POSTGRES_USER
+              valueFrom:
+                secretKeyRef:
+                  name: postgres-credentials
+                  key: POSTGRES_USER
+            - name: POSTGRES_PASSWORD
+              valueFrom:
+                secretKeyRef:
+                  name: postgres-credentials
+                  key: POSTGRES_PASSWORD
+            - name: POSTGRES_DB
+              valueFrom:
+                secretKeyRef:
+                  name: postgres-credentials
+                  key: POSTGRES_DB
+            - name: POSTGRES_HOST
+              valueFrom:
+                secretKeyRef:
+                  name: postgres-credentials
+                  key: POSTGRES_HOST
