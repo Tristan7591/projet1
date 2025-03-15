@@ -53,3 +53,20 @@ variable "db_instance_class" {
   type    = string
   default = "db.t3.micro"
 }
+
+# Variables nécessaires
+variable "environment" {
+  description = "Environment name"
+  type        = string
+  default     = "production"
+}
+
+variable "vpc_id" {
+  description = "VPC ID where EKS cluster will be created"
+  type        = string
+}
+
+variable "private_subnet_ids" {
+  description = "List of private subnet IDs for EKS cluster"
+  type        = list(string)
+}

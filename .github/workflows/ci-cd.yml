@@ -1,109 +1,165 @@
-name: CI-CD-Pipeline
+name: CI/CD Pipeline
 
 on:
   push:
-    branches: [ "main" ]
+    branches: [ main ]
+  pull_request:
+    branches: [ main ]
 
 jobs:
-  build-test-deploy:
+  # VALIDATION
+  validate:
     runs-on: ubuntu-latest
     steps:
-      ######################################################
-      # 1) Récupération du code
-      ######################################################
-      - name: Check out code
-        uses: actions/checkout@v3
+      - uses: actions/checkout@v3
+      - name: Validate Workflow Files
+        run: |
+          for file in .github/workflows/*.yml; do
+            echo "Validating $file"
+            gh workflow view "$file" >/dev/null
+          done
 
-      ######################################################
-      # 2) Configuration AWS
-      ######################################################
+  # APPLICATION JOBS
+  app-test:
+    needs: validate
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v3
+      - name: Set up JDK 17
+        uses: actions/setup-java@v3
+        with:
+          java-version: '17'
+          distribution: 'adopt'
+      - name: Build and Test
+        run: |
+          cd application
+          mvn test
+
+  app-security:
+    needs: validate
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v3
+      - name: OWASP Dependency Check
+        uses: jeremylong/DependencyCheck@v6.5.3
+        with:
+          project: "Application"
+          scan: "application"
+      - name: Build Backend Docker Image
+        run: |
+          cd application
+          docker build -t backend:latest .
+      - name: Build Frontend Docker Image
+        run: |
+          cd frontend
+          docker build -t frontend:latest .
+      - name: Trivy Scan Backend
+        uses: aquasecurity/trivy-action@v0.2.0
+        with:
+          image-ref: "backend:latest"
+          severity: "HIGH,CRITICAL"
+          ignore-unfixed: true
+      - name: Trivy Scan Frontend
+        uses: aquasecurity/trivy-action@v0.2.0
+        with:
+          image-ref: "frontend:latest"
+          severity: "HIGH,CRITICAL"
+          ignore-unfixed: true
+
+  # PUSH TO ECR
+  push-to-ecr:
+    needs: [app-test, app-security]
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v3
       - name: Configure AWS credentials
         uses: aws-actions/configure-aws-credentials@v1
         with:
           aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
           aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
-          aws-region: us-east-1  # À adapter
-
-      ######################################################
-      # 3) Compilation + Tests (JUnit + Mockito)
-      ######################################################
-      - name: Set up JDK 17
-        uses: actions/setup-java@v3
-        with:
-          distribution: 'temurin'
-          java-version: '17'
-
-      - name: Maven clean test
-        run: mvn clean test
-
-      - name: Maven integration tests
-        run: mvn verify -Pintegration-tests
-
-      ######################################################
-      # 4) Docker build & test local
-      ######################################################
-      - name: Build Docker image
-        run: docker build -t mon-application .
-
-      - name: Run container for quick test
-        run: |
-          docker run -d --name test-container -p 8080:8080 mon-application
-          sleep 5
-          curl -f http://localhost:8080/actuator/health
-          docker stop test-container
-          docker rm test-container
-
-      ######################################################
-      # 5) Terraform : EKS (subnet privé), RDS (subnet privé)
-      ######################################################
-      - name: Set up Terraform
-        uses: hashicorp/setup-terraform@v2
-        with:
-          terraform_version: 1.4.6
-
-      - name: Terraform Init
-        run: terraform init
-
-      - name: Terraform Validate
-        run: terraform validate
-
-      - name: Terraform Plan
-        run: terraform plan
-
-      - name: Terraform Apply
-        run: terraform apply -auto-approve
-
-      ######################################################
-      # 6) Push image to ECR
-      ######################################################
-      - name: Log in to Amazon ECR
+          aws-region: us-east-1
+      - name: Login to Amazon ECR
+        id: login-ecr
         uses: aws-actions/amazon-ecr-login@v1
-
-      - name: Tag Docker image
+      - name: Build and Push Backend Image
+        env:
+          ECR_REGISTRY: ${{ steps.login-ecr.outputs.registry }}
+          ECR_REPOSITORY: digital-store/backend
+          IMAGE_TAG: ${{ github.sha }}
         run: |
-          docker tag mon-application:latest \
-            ${{ env.AWS_ACCOUNT_ID }}.dkr.ecr.${{ env.AWS_REGION }}.amazonaws.com/mon-application:latest
-
-      - name: Push Docker image
+          cd application
+          docker build -t $ECR_REGISTRY/$ECR_REPOSITORY:$IMAGE_TAG .
+          docker push $ECR_REGISTRY/$ECR_REPOSITORY:$IMAGE_TAG
+          docker tag $ECR_REGISTRY/$ECR_REPOSITORY:$IMAGE_TAG $ECR_REGISTRY/$ECR_REPOSITORY:latest
+          docker push $ECR_REGISTRY/$ECR_REPOSITORY:latest
+      - name: Build and Push Frontend Image
+        env:
+          ECR_REGISTRY: ${{ steps.login-ecr.outputs.registry }}
+          ECR_REPOSITORY: digital-store/frontend
+          IMAGE_TAG: ${{ github.sha }}
         run: |
-          docker push ${{ env.AWS_ACCOUNT_ID }}.dkr.ecr.${{ env.AWS_REGION }}.amazonaws.com/mon-application:latest
+          cd frontend
+          docker build -t $ECR_REGISTRY/$ECR_REPOSITORY:$IMAGE_TAG .
+          docker push $ECR_REGISTRY/$ECR_REPOSITORY:$IMAGE_TAG
+          docker tag $ECR_REGISTRY/$ECR_REPOSITORY:$IMAGE_TAG $ECR_REGISTRY/$ECR_REPOSITORY:latest
+          docker push $ECR_REGISTRY/$ECR_REPOSITORY:latest
 
-      ######################################################
-      # 7) Déploiement Kubernetes (Ingress en public)
-      ######################################################
-      - name: Install kubectl
-        uses: actions/setup-kubectl@v3
+  # INFRASTRUCTURE JOBS
+  terraform-deploy:
+    needs: push-to-ecr
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v3
+      - name: Set up Terraform
+        uses: hashicorp/setup-terraform@v1
         with:
-          version: "v1.25.0"
-
-      - name: Update Kubeconfig
+          terraform_version: 1.5.0
+          cli_config_credentials_token: ${{ secrets.TF_API_TOKEN }}
+      - name: Terraform Init
         run: |
-          aws eks update-kubeconfig --name <EKS_CLUSTER_NAME> --region ${{ env.AWS_REGION }}
-
-      - name: Apply Kubernetes Manifests
+          cd terraform
+          terraform init
+      - name: Terraform Plan
         run: |
-          kubectl apply -f k8s/secret-postgres.yaml
-          kubectl apply -f k8s/deployment.yaml
-          kubectl apply -f k8s/service.yaml
-          kubectl apply -f k8s/ingress.yaml
-          kubectl rollout status deployment/mon-application
+          cd terraform
+          terraform plan
+      - name: Terraform Apply
+        run: |
+          cd terraform
+          terraform apply -auto-approve
+
+  # EKS DEPLOYMENT
+  eks-deploy:
+    needs: terraform-deploy
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v3
+      - name: Configure AWS Credentials
+        uses: aws-actions/configure-aws-credentials@v1
+        with:
+          aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
+          aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+          aws-region: us-east-1
+      - name: Update kubeconfig
+        run: aws eks update-kubeconfig --name digital-store-cluster
+      - name: Update Kubernetes manifest with new image tags
+        env:
+          IMAGE_TAG: ${{ github.sha }}
+          ECR_REGISTRY: ${{ steps.login-ecr.outputs.registry }}
+        run: |
+          # Update backend deployment with new image tag
+          sed -i "s|image:.*backend:.*|image: $ECR_REGISTRY/digital-store/backend:$IMAGE_TAG|g" k8s/application/backend/deployment.yaml
+          # Update frontend deployment with new image tag
+          sed -i "s|image:.*frontend:.*|image: $ECR_REGISTRY/digital-store/frontend:$IMAGE_TAG|g" k8s/application/frontend/deployment.yaml
+      - name: Deploy to EKS
+        run: |
+          kubectl apply -f k8s/database/postgres/secret.yaml
+          kubectl apply -f k8s/database/postgres/deployment.yaml
+          kubectl apply -f k8s/database/postgres/service.yaml
+          kubectl apply -f k8s/application/backend/deployment.yaml
+          kubectl apply -f k8s/application/backend/service.yaml
+          kubectl apply -f k8s/application/frontend/deployment.yaml
+          kubectl apply -f k8s/application/frontend/service.yaml
+          kubectl apply -f k8s/ingress/ingress.yaml
+          kubectl rollout status deployment/backend -n digital-store
+          kubectl rollout status deployment/frontend -n digital-store
