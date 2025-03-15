@@ -20,7 +20,7 @@ spec:
     spec:
       containers:
         - name: spring-boot-container
-          image: "xxxxxxxx.dkr.ecr.us-east-1.amazonaws.com/digital-store-backend:latest"
+          image: "${ecr_repository_url}:${image_tag}"
           ports:
             - containerPort: 8080
           resources:
@@ -69,52 +69,4 @@ spec:
       volumes:
         - name: config-volume
           configMap:
-            name: digital-store-config
----
-apiVersion: apps/v1
-kind: Deployment
-metadata:
-  name: digital-store-frontend
-  namespace: default
-  labels:
-    app: digital-store
-    tier: frontend
-spec:
-  replicas: 2
-  selector:
-    matchLabels:
-      app: digital-store
-      tier: frontend
-  template:
-    metadata:
-      labels:
-        app: digital-store
-        tier: frontend
-    spec:
-      containers:
-        - name: react-container
-          image: "xxxxxxxx.dkr.ecr.us-east-1.amazonaws.com/digital-store-frontend:latest"
-          ports:
-            - containerPort: 3000
-          resources:
-            requests:
-              memory: "128Mi"
-              cpu: "100m"
-            limits:
-              memory: "256Mi"
-              cpu: "200m"
-          readinessProbe:
-            httpGet:
-              path: /
-              port: 3000
-            initialDelaySeconds: 10
-            periodSeconds: 5
-          livenessProbe:
-            httpGet:
-              path: /
-              port: 3000
-            initialDelaySeconds: 20
-            periodSeconds: 10
-          env:
-            - name: REACT_APP_API_URL
-              value: "/api"
+            name: digital-store-config 

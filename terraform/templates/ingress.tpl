@@ -7,15 +7,9 @@ metadata:
     kubernetes.io/ingress.class: alb
     alb.ingress.kubernetes.io/scheme: internet-facing
     alb.ingress.kubernetes.io/listen-ports: '[{"HTTPS":443}]'
-
-    # Indiquez explicitement quels subnets publics l'ALB doit utiliser
-    # (Facultatif si le controller auto-découvre. Sinon précisez la liste.)
-    alb.ingress.kubernetes.io/subnets: "subnet-public1,subnet-public2"
-
-    alb.ingress.kubernetes.io/certificate-arn: "arn:aws:acm:us-east-1:123456789012:certificate/xxxx-xxxx-xxxx-xxxx"
+    alb.ingress.kubernetes.io/subnets: "${public_subnets}"
+    alb.ingress.kubernetes.io/certificate-arn: "${certificate_arn}"
     alb.ingress.kubernetes.io/target-type: ip
-
-    # Pas de config WAF, vous l'ajouterez plus tard
 spec:
   rules:
     - http:
@@ -33,4 +27,4 @@ spec:
               service:
                 name: digital-store-frontend-service
                 port:
-                  number: 80
+                  number: 80 

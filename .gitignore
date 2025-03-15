@@ -1,76 +1,75 @@
-# Maven
-target/
-!.mvn/wrapper/maven-wrapper.jar
-!**/src/main/**/target/
-!**/src/test/**/target/
-
-# Node
-node_modules/
-npm-debug.log
-yarn-debug.log
-yarn-error.log
-dist/
-build/
-
-# IDE
-.idea/
-*.iws
-*.iml
-*.ipr
-.vscode/
-*.suo
-*.ntvs*
-*.njsproj
-*.sln
-*.sw?
-
-# Terraform
-.terraform/
-*.tfstate
-*.tfstate.*
-*.tfvars
-.terraformrc
-terraform.rc
-
-# System
-.DS_Store
-Thumbs.db
-*.log
-*.tmp
-*.temp
-
-# Application specific
+# ------- Application -------
+# Java / Maven
 application/target/
-application/logs/
-application/.settings/
-application/.classpath
-application/.project
-
-# Environment
-.env
-.env.local
-.env.*.local
-
+application/mvnw
+application/mvnw.cmd
+application/.mvn/
 application/*.jar
-*.class
-*.war
-*.ear
-*.logs
-.mtj.tmp/
-.mvn/timing.properties
-.mvn/wrapper/maven-wrapper.jar
+application/*.war
+application/*.ear
+application/logs/
+application/*.log
+application/dependency-reduced-pom.xml
+application/.classpath
+application/.factorypath
+application/.project
+application/.settings/
+application/bin/
 
+# React Frontend
+application/frontend/node_modules/
+application/frontend/.pnp
+application/frontend/.pnp.js
+application/frontend/build/
+application/frontend/coverage/
+application/frontend/npm-debug.log*
+application/frontend/yarn-debug.log*
+application/frontend/yarn-error.log*
+application/frontend/.env*
+application/frontend/.eslintcache
+
+# ------- Infrastructure -------
+# Terraform
+terraform/.terraform/
+terraform/*.tfstate
+terraform/*.tfstate.*
+terraform/*.tfvars
+terraform/.terraform.lock.hcl
+terraform/crash.log
+terraform/override.tf
+terraform/override.tf.json
+terraform/*_override.tf
+terraform/*_override.tf.json
+terraform/terraform.rc
+
+# Kubernetes
+kubeconfig
+k8s/**/*.retry
+k8s/**/*.kube-config
+
+# AWS
+credentials
+.aws/
+*.pem
+
+# ------- IDE & Éditeurs -------
+# IntelliJ
 .idea/
 *.iml
 *.iws
 *.ipr
+*.ids
+*.orig
+out/
 
-.vscode/
-*.code-workspace
-.settings/
-.classpath
-.project
+# VSCode
+.vscode/*
+!.vscode/settings.json
+!.vscode/tasks.json
+!.vscode/launch.json
+!.vscode/extensions.json
 
+# Eclipse
 .metadata
 bin/
 tmp/
@@ -78,67 +77,58 @@ tmp/
 *.bak
 *.swp
 *~.nib
-local.properties
+.settings/
 .loadpath
 .recommenders
 
-frontend/node_modules/
-frontend/build/
-frontend/dist/
-frontend/.env
-frontend/npm-debug.log*
-frontend/yarn-debug.log*
-frontend/yarn-error.log*
-frontend/.pnp
-frontend/.pnp.js
-frontend/coverage/
-
-terraform/.terraform/
-terraform/*.tfstate
-terraform/*.tfstate.*
-terraform/*.tfvars
-terraform/.terraformrc
-terraform/terraform.rc
-terraform/crash.log
-terraform/override.tf
-terraform/override.tf.json
-terraform/*_override.tf
-terraform/*_override.tf.json
-
-
-.aws/
-aws.json
-credentials.json
-**/aws.credentials
-
-kubeconfig
-*.kubeconfig
-k8s/**/*.secret.yaml
-k8s/**/secrets/
-
+# ------- Système -------
+# OS
 .DS_Store
 Thumbs.db
+*~
+*.swp
+*.swo
+*.lock
+*.bak
+
+# Logs et Temp
+*.log
 *.pid
 *.seed
 *.pid.lock
 
-.env
-.env.local
-.env.development.local
-.env.test.local
-.env.production.local
-**/.env*
+# Security
+*.key
+*.pem
+*.crt
+*.cer
+*.p12
+*.pfx
+*.jks
+*.keystore
+**/secrets.*
+**/*.password
+**/*.secret
 
+# Environment
+.env
+.env.*
+env.json
+!.env.example
+
+# Docker
 .docker/
 docker-compose.override.yml
 
-*.swp
-*.swo
-.history/
-.temp/
-.cache/
+# Misc
+**/.keep
+**/.tmp
+logs/
+*.log
+npm-debug.log*
+yarn-debug.log*
+yarn-error.log*
 coverage/
-*.pem
-*.key
-*.cert
-*.crt 
+dist/
+.cache/
+node_modules/ 
