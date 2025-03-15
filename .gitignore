@@ -1,6 +1,56 @@
-application/node_modules/
+# Maven
+target/
+!.mvn/wrapper/maven-wrapper.jar
+!**/src/main/**/target/
+!**/src/test/**/target/
+
+# Node
+node_modules/
+npm-debug.log
+yarn-debug.log
+yarn-error.log
+dist/
+build/
+
+# IDE
+.idea/
+*.iws
+*.iml
+*.ipr
+.vscode/
+*.suo
+*.ntvs*
+*.njsproj
+*.sln
+*.sw?
+
+# Terraform
+.terraform/
+*.tfstate
+*.tfstate.*
+*.tfvars
+.terraformrc
+terraform.rc
+
+# System
+.DS_Store
+Thumbs.db
+*.log
+*.tmp
+*.temp
+
+# Application specific
 application/target/
-application/target/
+application/logs/
+application/.settings/
+application/.classpath
+application/.project
+
+# Environment
+.env
+.env.local
+.env.*.local
+
 application/*.jar
 *.class
 *.war
@@ -68,7 +118,6 @@ k8s/**/secrets/
 
 .DS_Store
 Thumbs.db
-*.log
 *.pid
 *.seed
 *.pid.lock
@@ -88,7 +137,6 @@ docker-compose.override.yml
 .history/
 .temp/
 .cache/
-dist/
 coverage/
 *.pem
 *.key
