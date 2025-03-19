@@ -1,23 +1,9 @@
-resource "aws_acm_certificate" "cert" {
-  domain_name       = var.domain_name
-  validation_method = "DNS"
-
-  tags = {
-    Environment = var.environment
-    Name        = "digital-store-cert"
-  }
-
-  lifecycle {
-    create_before_destroy = true
-  }
-}
-
 resource "aws_lb" "main" {
   name               = "digital-store-alb"
   internal           = false
   load_balancer_type = "application"
   security_groups    = [aws_security_group.alb.id]
-  subnets            = var.public_subnet_ids
+  subnets            = local.public_subnet_ids
 
   enable_deletion_protection = false
 
@@ -27,12 +13,10 @@ resource "aws_lb" "main" {
   }
 }
 
-resource "aws_lb_listener" "https" {
+resource "aws_lb_listener" "http" {
   load_balancer_arn = aws_lb.main.arn
-  port              = "443"
-  protocol          = "HTTPS"
-  ssl_policy        = "ELBSecurityPolicy-2016-08"
-  certificate_arn   = aws_acm_certificate.cert.arn
+  port              = "80"
+  protocol          = "HTTP"
 
   default_action {
     type = "fixed-response"
@@ -46,13 +30,13 @@ resource "aws_lb_listener" "https" {
 
 resource "aws_security_group" "alb" {
   name        = "digital-store-alb-sg"
-  description = "Allow HTTPS inbound traffic"
-  vpc_id      = var.vpc_id
+  description = "Allow HTTP inbound traffic"
+  vpc_id      = local.vpc_id
 
   ingress {
-    description = "HTTPS from anywhere"
-    from_port   = 443
-    to_port     = 443
+    description = "HTTP from anywhere"
+    from_port   = 80
+    to_port     = 80
     protocol    = "tcp"
     cidr_blocks = ["0.0.0.0/0"]
   }

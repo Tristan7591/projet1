@@ -1,6 +1,6 @@
 output "eks_cluster_name" {
-  description = "Nom du cluster EKS"
-  value       = module.eks.cluster_id
+  description = "EKS cluster name"
+  value       = aws_eks_cluster.main.name
 }
 
 output "eks_cluster_endpoint" {
@@ -10,7 +10,7 @@ output "eks_cluster_endpoint" {
 
 output "eks_cluster_ca" {
   description = "Certificat CA du cluster EKS"
-  value       = module.eks.cluster_certificate_authority_data
+  value       = aws_eks_cluster.main.certificate_authority[0].data
 }
 
 output "rds_endpoint" {
@@ -21,11 +21,6 @@ output "rds_endpoint" {
 output "eks_cluster_id" {
   description = "EKS cluster ID"
   value       = aws_eks_cluster.main.id
-}
-
-output "eks_cluster_name" {
-  description = "EKS cluster name"
-  value       = aws_eks_cluster.main.name
 }
 
 output "ecr_backend_repository_url" {
@@ -40,7 +35,7 @@ output "ecr_frontend_repository_url" {
 
 output "kubeconfig_command" {
   description = "Command to configure kubectl"
-  value       = "aws eks update-kubeconfig --name ${aws_eks_cluster.main.name} --region ${var.region}"
+  value       = "aws eks update-kubeconfig --name ${aws_eks_cluster.main.name} --region ${var.aws_region}"
 }
 
 output "alb_dns_name" {
@@ -50,15 +45,15 @@ output "alb_dns_name" {
 
 output "certificate_validation_instructions" {
   description = "Instructions for validating the certificate"
-  value       = "Please validate the certificate by adding the necessary DNS records"
+  value       = "Si vous configurez HTTPS ultérieurement, validez le certificat en ajoutant les enregistrements DNS nécessaires"
 }
 
 output "db_endpoint" {
   description = "The endpoint of the database"
-  value       = aws_db_instance.digitalstore.endpoint
+  value       = aws_db_instance.postgres.endpoint
 }
 
 output "db_name" {
   description = "The database name"
-  value       = aws_db_instance.digitalstore.db_name
+  value       = aws_db_instance.postgres.db_name
 }

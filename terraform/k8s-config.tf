@@ -26,7 +26,6 @@ resource "local_file" "k8s_frontend_service" {
 
 resource "local_file" "k8s_ingress" {
   content = templatefile("${path.module}/templates/ingress.tpl", {
-    certificate_arn = aws_acm_certificate.cert.arn
     public_subnets  = join(",", var.public_subnet_ids)
   })
   filename = "../k8s/ingress/ingress.yaml"
@@ -37,7 +36,7 @@ resource "local_file" "k8s_postgres_secret" {
     postgres_user     = base64encode(var.db_username)
     postgres_password = base64encode(var.db_password)
     postgres_db       = base64encode(var.db_name)
-    postgres_host     = base64encode(aws_db_instance.digitalstore.address)
+    postgres_host     = base64encode(aws_db_instance.postgres.address)
   })
   filename = "../k8s/database/postgres/secret.yaml"
 }

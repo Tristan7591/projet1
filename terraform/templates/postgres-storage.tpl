@@ -3,10 +3,12 @@ kind: PersistentVolumeClaim
 metadata:
   name: postgres-pvc
   namespace: default
+  labels:
+    app: postgres
 spec:
   accessModes:
     - ReadWriteOnce
   resources:
     requests:
       storage: 10Gi
-  storageClassName: gp2 
+  storageClassName: ebs-sc 
