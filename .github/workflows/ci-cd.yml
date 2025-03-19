@@ -77,7 +77,7 @@ jobs:
         with:
           aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
           aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
-          aws-region: us-east-1
+          aws-region: ${{ secrets.AWS_REGION || 'us-east-1' }}
       - name: Login to Amazon ECR
         id: login-ecr
         uses: aws-actions/amazon-ecr-login@v1
@@ -114,7 +114,26 @@ jobs:
         uses: hashicorp/setup-terraform@v1
         with:
           terraform_version: 1.5.0
-          cli_config_credentials_token: ${{ secrets.TF_API_TOKEN }}
+      - name: Configure AWS credentials
+        uses: aws-actions/configure-aws-credentials@v1
+        with:
+          aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
+          aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+          aws-region: ${{ secrets.AWS_REGION || 'us-east-1' }}
+      - name: Create terraform.tfvars
+        run: |
+          cd terraform
+          cat > terraform.tfvars << EOF
+          # AWS Credentials
+          aws_region         = "${{ secrets.AWS_REGION || 'us-east-1' }}"
+          
+          # Application
+          environment        = "production"
+          
+          # Database
+          db_username        = "admin"
+          db_password        = "${{ secrets.DB_PASSWORD }}"
+          EOF
       - name: Terraform Init
         run: |
           cd terraform
@@ -139,29 +158,48 @@ jobs:
         with:
           aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
           aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
-          aws-region: us-east-1
+          aws-region: ${{ secrets.AWS_REGION || 'us-east-1' }}
+      - name: Login to Amazon ECR
+        id: login-ecr
+        uses: aws-actions/amazon-ecr-login@v1
       - name: Update kubeconfig
-        run: aws eks update-kubeconfig --name digital-store-cluster
+        run: aws eks update-kubeconfig --name digital-store-cluster --region ${{ secrets.AWS_REGION || 'us-east-1' }}
       - name: Update Kubernetes manifest with new image tags
         env:
           IMAGE_TAG: ${{ github.sha }}
           ECR_REGISTRY: ${{ steps.login-ecr.outputs.registry }}
         run: |
           # Update backend deployment with new image tag
-          sed -i "s|image:.*backend:.*|image: $ECR_REGISTRY/digital-store/backend:$IMAGE_TAG|g" k8s/backend/deployment.yaml
+          sed -i "s|image:.*digital-store/backend:.*|image: $ECR_REGISTRY/digital-store/backend:$IMAGE_TAG|g" k8s/backend/deployment.yaml
           # Update frontend deployment with new image tag
-          sed -i "s|image:.*frontend:.*|image: $ECR_REGISTRY/digital-store/frontend:$IMAGE_TAG|g" k8s/frontend/deployment.yaml
+          sed -i "s|image:.*digital-store/frontend:.*|image: $ECR_REGISTRY/digital-store/frontend:$IMAGE_TAG|g" k8s/frontend/deployment.yaml
       - name: Deploy to EKS
         run: |
-          kubectl apply -f k8s/database/postgres/secret.yaml
+          # Attendre que le EBS CSI Driver soit prêt
+          kubectl -n kube-system wait deployment/ebs-csi-controller --for=condition=available --timeout=300s || true
+          
+          # Créer postgres-credentials s'il n'existe pas déjà
+          kubectl get secret postgres-credentials || kubectl create secret generic postgres-credentials \
+            --from-literal=POSTGRES_DB=digitalstore \
+            --from-literal=POSTGRES_USER=admin \
+            --from-literal=POSTGRES_PASSWORD=${{ secrets.DB_PASSWORD }} \
+            --from-literal=POSTGRES_HOST=digital-store-db.${{ secrets.AWS_REGION }}.rds.amazonaws.com
+          
+          # Déployer les ressources
           kubectl apply -f k8s/database/postgres/storage.yaml
           kubectl apply -f k8s/database/postgres/deployment.yaml
           kubectl apply -f k8s/database/postgres/service.yaml
+          kubectl apply -f k8s/configmap.yaml
           kubectl apply -f k8s/backend/deployment.yaml
           kubectl apply -f k8s/backend/service.yaml
           kubectl apply -f k8s/frontend/deployment.yaml
           kubectl apply -f k8s/frontend/service.yaml
           kubectl apply -f k8s/ingress/ingress.yaml
-          kubectl apply -f k8s/configmap.yaml
+          
+          # Vérifier le statut des déploiements
+          kubectl wait --for=condition=ready pod -l app=postgres --timeout=300s || true
           kubectl rollout status deployment/digital-store-backend
           kubectl rollout status deployment/digital-store-frontend
+          
+          echo "Deployment completed successfully!"
+          echo "Application will be available at: https://${DOMAIN_NAME} (once DNS is configured)"
