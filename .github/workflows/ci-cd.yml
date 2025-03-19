@@ -13,6 +13,8 @@ jobs:
     steps:
       - uses: actions/checkout@v3
       - name: Validate Workflow Files
+        env:
+          GH_TOKEN: ${{ github.token }}
         run: |
           for file in .github/workflows/*.yml; do
             echo "Validating $file"
