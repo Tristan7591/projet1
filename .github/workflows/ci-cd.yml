@@ -13,6 +13,8 @@ jobs:
     steps:
       - uses: actions/checkout@v3
       - name: Validate Workflow Files
+        env:
+          GH_TOKEN: ${{ github.token }}
         run: |
           for file in .github/workflows/*.yml; do
             echo "Validating $file"
@@ -54,13 +56,13 @@ jobs:
           cd application/frontend
           docker build -t frontend:latest .
       - name: Trivy Scan Backend
-        uses: aquasecurity/trivy-action@v0.2.0
+        uses: aquasecurity/trivy-action@v0.11.0
         with:
           image-ref: "backend:latest"
           severity: "HIGH,CRITICAL"
           ignore-unfixed: true
       - name: Trivy Scan Frontend
-        uses: aquasecurity/trivy-action@v0.2.0
+        uses: aquasecurity/trivy-action@v0.11.0
         with:
           image-ref: "frontend:latest"
           severity: "HIGH,CRITICAL"
