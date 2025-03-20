@@ -27,9 +27,10 @@ jobs:
       - name: Set up JDK 17
         uses: actions/setup-java@v3
         with:
+          distribution: 'temurin'
           java-version: '17'
-          distribution: 'corretto'
-      - run: |
+      - name: Build and Test
+        run: |
           cd application
           mvn test
 
@@ -70,53 +71,53 @@ jobs:
           docker build -t frontend:latest .
 
   push-to-ecr:
-  needs: [app-test, app-security]
-  runs-on: ubuntu-latest
-  steps:
-    - uses: actions/checkout@v3
+    needs: [app-test, app-security]
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v3
 
-    - name: Configure AWS credentials
-      uses: aws-actions/configure-aws-credentials@v1
-      with:
-        aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
-        aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
-        aws-region: ${{ secrets.AWS_REGION || 'us-east-1' }}
+      - name: Configure AWS credentials
+        uses: aws-actions/configure-aws-credentials@v1
+        with:
+          aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
+          aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+          aws-region: ${{ secrets.AWS_REGION || 'us-east-1' }}
 
-    - name: Login to Amazon ECR
-      id: login-ecr
-      uses: aws-actions/amazon-ecr-login@v2
+      - name: Login to Amazon ECR
+        id: login-ecr
+        uses: aws-actions/amazon-ecr-login@v2
 
-    - name: Push Backend Image
-      env:
-        ECR_REGISTRY: 797394900921.dkr.ecr.us-east-1.amazonaws.com
-        ECR_REPOSITORY: tristan
-        IMAGE_TAG: ${{ github.sha }}
-      run: |
-        cd application
-        docker build -t $ECR_REGISTRY/$ECR_REPOSITORY:$IMAGE_TAG .
-        docker push $ECR_REGISTRY/$ECR_REPOSITORY:$IMAGE_TAG
-        docker tag $ECR_REGISTRY/$ECR_REPOSITORY:$IMAGE_TAG $ECR_REGISTRY/$ECR_REPOSITORY:latest
-        docker push $ECR_REGISTRY/$ECR_REPOSITORY:latest
+      - name: Push Backend Image
+        env:
+          ECR_REGISTRY: 797394900921.dkr.ecr.us-east-1.amazonaws.com
+          ECR_REPOSITORY: tristan
+          IMAGE_TAG: ${{ github.sha }}
+        run: |
+          cd application
+          docker build -t $ECR_REGISTRY/$ECR_REPOSITORY:$IMAGE_TAG .
+          docker push $ECR_REGISTRY/$ECR_REPOSITORY:$IMAGE_TAG
+          docker tag $ECR_REGISTRY/$ECR_REPOSITORY:$IMAGE_TAG $ECR_REGISTRY/$ECR_REPOSITORY:latest
+          docker push $ECR_REGISTRY/$ECR_REPOSITORY:latest
 
-    - name: Push Frontend Image
-      env:
-        ECR_REGISTRY: 797394900921.dkr.ecr.us-east-1.amazonaws.com
-        ECR_REPOSITORY: tristan-frontend
-        IMAGE_TAG: ${{ github.sha }}
-      run: |
-        cd application/frontend
-        docker build -t $ECR_REGISTRY/$ECR_REPOSITORY:$IMAGE_TAG .
-        docker push $ECR_REGISTRY/$ECR_REPOSITORY:$IMAGE_TAG
-        docker tag $ECR_REGISTRY/$ECR_REPOSITORY:$IMAGE_TAG $ECR_REGISTRY/$ECR_REPOSITORY:latest
-        docker push $ECR_REGISTRY/$ECR_REPOSITORY:latest
-
+      - name: Push Frontend Image
+        env:
+          ECR_REGISTRY: 797394900921.dkr.ecr.us-east-1.amazonaws.com
+          ECR_REPOSITORY: tristan-frontend
+          IMAGE_TAG: ${{ github.sha }}
+        run: |
+          cd application/frontend
+          docker build -t $ECR_REGISTRY/$ECR_REPOSITORY:$IMAGE_TAG .
+          docker push $ECR_REGISTRY/$ECR_REPOSITORY:$IMAGE_TAG
+          docker tag $ECR_REGISTRY/$ECR_REPOSITORY:$IMAGE_TAG $ECR_REGISTRY/$ECR_REPOSITORY:latest
+          docker push $ECR_REGISTRY/$ECR_REPOSITORY:latest
 
   terraform-deploy:
     needs: push-to-ecr
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v3
-      - uses: hashicorp/setup-terraform@v1
+      - name: Set up Terraform
+        uses: hashicorp/setup-terraform@v1
         with:
           terraform_version: 1.5.0
       - uses: aws-actions/configure-aws-credentials@v1
@@ -140,14 +141,15 @@ jobs:
           aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
           aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
           aws-region: ${{ secrets.AWS_REGION || 'us-east-1' }}
-      - uses: aws-actions/amazon-ecr-login@v1
-      - run: aws eks update-kubeconfig --name digital-store-cluster --region ${{ secrets.AWS_REGION || 'us-east-1' }}
+      - uses: aws-actions/amazon-ecr-login@v2
+      - name: Update kubeconfig
+        run: aws eks update-kubeconfig --name digital-store-cluster --region ${{ secrets.AWS_REGION || 'us-east-1' }}
       - name: Deploy to EKS
         env:
           IMAGE_TAG: ${{ github.sha }}
-          ECR_REGISTRY: ${{ steps.login-ecr.outputs.registry }}
+          ECR_REGISTRY: 797394900921.dkr.ecr.us-east-1.amazonaws.com
         run: |
-          sed -i "s|image:.*digital-store/backend:.*|image: $ECR_REGISTRY/digital-store/backend:$IMAGE_TAG|g" k8s/backend/deployment.yaml
-          sed -i "s|image:.*digital-store/frontend:.*|image: $ECR_REGISTRY/digital-store/frontend:$IMAGE_TAG|g" k8s/frontend/deployment.yaml
+          sed -i "s|image:.*digital-store/backend:.*|image: $ECR_REGISTRY/tristan:$IMAGE_TAG|g" k8s/backend/deployment.yaml
+          sed -i "s|image:.*digital-store/frontend:.*|image: $ECR_REGISTRY/tristan-frontend:$IMAGE_TAG|g" k8s/frontend/deployment.yaml
           kubectl apply -f k8s
 
