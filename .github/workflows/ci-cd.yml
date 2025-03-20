@@ -39,7 +39,6 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v3
-
       - name: OWASP Dependency Check Backend
         uses: dependency-check/Dependency-Check_Action@main
         env:
@@ -49,7 +48,6 @@ jobs:
           path: "application"
           format: "HTML"
           args: "--failOnCVSS 7"
-
       - name: OWASP Dependency Check Frontend
         uses: dependency-check/Dependency-Check_Action@main
         env:
@@ -59,12 +57,10 @@ jobs:
           path: "application/frontend"
           format: "HTML"
           args: "--failOnCVSS 7"
-
       - name: Build Backend Docker Image
         run: |
           cd application
           docker build -t backend:latest .
-
       - name: Build Frontend Docker Image
         run: |
           cd application/frontend
@@ -75,14 +71,12 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v3
-
       - name: Configure AWS credentials
         uses: aws-actions/configure-aws-credentials@v1
         with:
           aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
           aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
           aws-region: ${{ secrets.AWS_REGION || 'us-east-1' }}
-
       - name: Login to Amazon ECR
         id: login-ecr
         uses: aws-actions/amazon-ecr-login@v2
@@ -102,7 +96,7 @@ jobs:
       - name: Push Frontend Image
         env:
           ECR_REGISTRY: 797394900921.dkr.ecr.us-east-1.amazonaws.com
-          ECR_REPOSITORY: tristan-frontend
+          ECR_REPOSITORY: tristan-fronted
           IMAGE_TAG: ${{ github.sha }}
         run: |
           cd application/frontend
@@ -116,8 +110,7 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v3
-      - name: Set up Terraform
-        uses: hashicorp/setup-terraform@v1
+      - uses: hashicorp/setup-terraform@v1
         with:
           terraform_version: 1.5.0
       - uses: aws-actions/configure-aws-credentials@v1
@@ -150,6 +143,5 @@ jobs:
           ECR_REGISTRY: 797394900921.dkr.ecr.us-east-1.amazonaws.com
         run: |
           sed -i "s|image:.*digital-store/backend:.*|image: $ECR_REGISTRY/tristan:$IMAGE_TAG|g" k8s/backend/deployment.yaml
-          sed -i "s|image:.*digital-store/frontend:.*|image: $ECR_REGISTRY/tristan-frontend:$IMAGE_TAG|g" k8s/frontend/deployment.yaml
-          kubectl apply -f k8s
-
+          sed -i "s|image:.*digital-store/frontend:.*|image: $ECR_REGISTRY/tristan-fronted:$IMAGE_TAG|g" k8s/frontend/deployment.yaml
+          kubectl apply -f k8s```
