@@ -42,11 +42,20 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v3
-      - name: OWASP Dependency Check
-        uses: jeremylong/DependencyCheck@v6.5.3
+      - name: OWASP Dependency Check Backend
+        uses: dependency-check/Dependency-Check_Action@v1.1.0
         with:
-          project: "Application"
-          scan: "application"
+          project: "Application Backend"
+          path: "application"
+          format: "HTML"
+          args: "--failOnCVSS 7"
+      - name: OWASP Dependency Check Frontend
+        uses: dependency-check/Dependency-Check_Action@v1.1.0
+        with:
+          project: "Application Frontend"
+          path: "application/frontend"
+          format: "HTML"
+          args: "--failOnCVSS 7"
       - name: Build Backend Docker Image
         run: |
           cd application
@@ -55,21 +64,6 @@ jobs:
         run: |
           cd application/frontend
           docker build -t frontend:latest .
-
-      # Installer Grype
-      - name: Install Grype
-        run: |
-          curl -sSfL https://raw.githubusercontent.com/anchore/grype/main/install.sh | sh -s -- -b /usr/local/bin
-
-      # Scan Backend avec Grype
-      - name: Grype Scan Backend
-        run: |
-          grype backend:latest --fail-on high
-
-      # Scan Frontend avec Grype
-      - name: Grype Scan Frontend
-        run: |
-          grype frontend:latest --fail-on high
 
   # PUSH TO ECR
   push-to-ecr:
