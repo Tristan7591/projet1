@@ -21,7 +21,7 @@ jobs:
             gh workflow view "$file" >/dev/null
           done
 
-  # APPLICATION TESTS
+  # APPLICATION JOBS
   app-test:
     needs: validate
     runs-on: ubuntu-latest
@@ -37,12 +37,16 @@ jobs:
           cd application
           mvn test
 
-  # BUILD IMAGES (Nécessaire avant le scan Trivy)
-  build-images:
+  app-security:
     needs: validate
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v3
+      - name: OWASP Dependency Check
+        uses: jeremylong/DependencyCheck@v6.5.3
+        with:
+          project: "Application"
+          scan: "application"
       - name: Build Backend Docker Image
         run: |
           cd application
@@ -52,33 +56,24 @@ jobs:
           cd application/frontend
           docker build -t frontend:latest .
 
-  # SCAN DE SÉCURITÉ (Trivy ne s'exécute qu'après le build)
-  scan-security:
-    needs: build-images
-    runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@v3
-      - name: OWASP Dependency Check
-        uses: jeremylong/DependencyCheck@v6.5.3
-        with:
-          project: "Application"
-          scan: "application"
-      - name: Run Trivy Scan Backend
-        uses: aquasecurity/trivy-action@0.29.0
-        with:
-          image-ref: "backend:latest"
-          severity: "HIGH,CRITICAL"
-          ignore-unfixed: true
-      - name: Run Trivy Scan Frontend
-        uses: aquasecurity/trivy-action@0.29.0
-        with:
-          image-ref: "frontend:latest"
-          severity: "HIGH,CRITICAL"
-          ignore-unfixed: true
+      # Installer Grype
+      - name: Install Grype
+        run: |
+          curl -sSfL https://raw.githubusercontent.com/anchore/grype/main/install.sh | sh -s -- -b /usr/local/bin
 
-  # PUSH TO ECR (Nécessite un scan réussi)
+      # Scan Backend avec Grype
+      - name: Grype Scan Backend
+        run: |
+          grype backend:latest --fail-on high
+
+      # Scan Frontend avec Grype
+      - name: Grype Scan Frontend
+        run: |
+          grype frontend:latest --fail-on high
+
+  # PUSH TO ECR
   push-to-ecr:
-    needs: [app-test, scan-security]
+    needs: [app-test, app-security]
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v3
@@ -91,30 +86,30 @@ jobs:
       - name: Login to Amazon ECR
         id: login-ecr
         uses: aws-actions/amazon-ecr-login@v1
-      - name: Push Backend Image
+      - name: Build and Push Backend Image
         env:
           ECR_REGISTRY: ${{ steps.login-ecr.outputs.registry }}
           ECR_REPOSITORY: digital-store/backend
           IMAGE_TAG: ${{ github.sha }}
         run: |
           cd application
-          docker tag backend:latest $ECR_REGISTRY/$ECR_REPOSITORY:$IMAGE_TAG
+          docker build -t $ECR_REGISTRY/$ECR_REPOSITORY:$IMAGE_TAG .
           docker push $ECR_REGISTRY/$ECR_REPOSITORY:$IMAGE_TAG
           docker tag $ECR_REGISTRY/$ECR_REPOSITORY:$IMAGE_TAG $ECR_REGISTRY/$ECR_REPOSITORY:latest
           docker push $ECR_REGISTRY/$ECR_REPOSITORY:latest
-      - name: Push Frontend Image
+      - name: Build and Push Frontend Image
         env:
           ECR_REGISTRY: ${{ steps.login-ecr.outputs.registry }}
           ECR_REPOSITORY: digital-store/frontend
           IMAGE_TAG: ${{ github.sha }}
         run: |
           cd application/frontend
-          docker tag frontend:latest $ECR_REGISTRY/$ECR_REPOSITORY:$IMAGE_TAG
+          docker build -t $ECR_REGISTRY/$ECR_REPOSITORY:$IMAGE_TAG .
           docker push $ECR_REGISTRY/$ECR_REPOSITORY:$IMAGE_TAG
           docker tag $ECR_REGISTRY/$ECR_REPOSITORY:$IMAGE_TAG $ECR_REGISTRY/$ECR_REPOSITORY:latest
           docker push $ECR_REGISTRY/$ECR_REPOSITORY:latest
 
-  # INFRASTRUCTURE DEPLOYMENT
+  # INFRASTRUCTURE JOBS
   terraform-deploy:
     needs: push-to-ecr
     runs-on: ubuntu-latest
@@ -124,13 +119,40 @@ jobs:
         uses: hashicorp/setup-terraform@v1
         with:
           terraform_version: 1.5.0
-      - name: Terraform Init & Apply
+      - name: Configure AWS credentials
+        uses: aws-actions/configure-aws-credentials@v1
+        with:
+          aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
+          aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+          aws-region: ${{ secrets.AWS_REGION || 'us-east-1' }}
+      - name: Create terraform.tfvars
+        run: |
+          cd terraform
+          cat > terraform.tfvars << EOF
+          # AWS Credentials
+          aws_region         = "${{ secrets.AWS_REGION || 'us-east-1' }}"
+          
+          # Application
+          environment        = "production"
+          
+          # Database
+          db_username        = "admin"
+          db_password        = "${{ secrets.DB_PASSWORD }}"
+          EOF
+      - name: Terraform Init
         run: |
           cd terraform
           terraform init
+      - name: Terraform Plan
+        run: |
+          cd terraform
+          terraform plan
+      - name: Terraform Apply
+        run: |
+          cd terraform
           terraform apply -auto-approve
 
-  # KUBERNETES DEPLOYMENT
+  # EKS DEPLOYMENT
   eks-deploy:
     needs: terraform-deploy
     runs-on: ubuntu-latest
@@ -145,14 +167,25 @@ jobs:
       - name: Login to Amazon ECR
         id: login-ecr
         uses: aws-actions/amazon-ecr-login@v1
-      - name: Update Kubernetes manifests & Deploy
+      - name: Update kubeconfig
+        run: aws eks update-kubeconfig --name digital-store-cluster --region ${{ secrets.AWS_REGION || 'us-east-1' }}
+      - name: Update Kubernetes manifest with new image tags
         env:
           IMAGE_TAG: ${{ github.sha }}
           ECR_REGISTRY: ${{ steps.login-ecr.outputs.registry }}
         run: |
           sed -i "s|image:.*digital-store/backend:.*|image: $ECR_REGISTRY/digital-store/backend:$IMAGE_TAG|g" k8s/backend/deployment.yaml
           sed -i "s|image:.*digital-store/frontend:.*|image: $ECR_REGISTRY/digital-store/frontend:$IMAGE_TAG|g" k8s/frontend/deployment.yaml
+      - name: Deploy to EKS
+        run: |
+          kubectl apply -f k8s/database/postgres/storage.yaml
+          kubectl apply -f k8s/database/postgres/deployment.yaml
+          kubectl apply -f k8s/database/postgres/service.yaml
+          kubectl apply -f k8s/configmap.yaml
           kubectl apply -f k8s/backend/deployment.yaml
+          kubectl apply -f k8s/backend/service.yaml
           kubectl apply -f k8s/frontend/deployment.yaml
+          kubectl apply -f k8s/frontend/service.yaml
+          kubectl apply -f k8s/ingress/ingress.yaml
           kubectl rollout status deployment/digital-store-backend
           kubectl rollout status deployment/digital-store-frontend
