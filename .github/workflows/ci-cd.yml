@@ -93,7 +93,7 @@ jobs:
       - name: Push Frontend Image
         env:
           ECR_REGISTRY: 797394900921.dkr.ecr.us-east-1.amazonaws.com
-          ECR_REPOSITORY: tristan-fronted
+          ECR_REPOSITORY: tristan-frontend
           IMAGE_TAG: ${{ github.sha }}
         run: |
           cd application/frontend
