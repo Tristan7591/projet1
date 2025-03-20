@@ -78,9 +78,7 @@ jobs:
           aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
           aws-region: ${{ secrets.AWS_REGION || 'us-east-1' }}
       - name: Login to Amazon ECR
-        id: login-ecr
         uses: aws-actions/amazon-ecr-login@v2
-
       - name: Push Backend Image
         env:
           ECR_REGISTRY: 797394900921.dkr.ecr.us-east-1.amazonaws.com
@@ -92,7 +90,6 @@ jobs:
           docker push $ECR_REGISTRY/$ECR_REPOSITORY:$IMAGE_TAG
           docker tag $ECR_REGISTRY/$ECR_REPOSITORY:$IMAGE_TAG $ECR_REGISTRY/$ECR_REPOSITORY:latest
           docker push $ECR_REGISTRY/$ECR_REPOSITORY:latest
-
       - name: Push Frontend Image
         env:
           ECR_REGISTRY: 797394900921.dkr.ecr.us-east-1.amazonaws.com
@@ -144,4 +141,23 @@ jobs:
         run: |
           sed -i "s|image:.*digital-store/backend:.*|image: $ECR_REGISTRY/tristan:$IMAGE_TAG|g" k8s/backend/deployment.yaml
           sed -i "s|image:.*digital-store/frontend:.*|image: $ECR_REGISTRY/tristan-fronted:$IMAGE_TAG|g" k8s/frontend/deployment.yaml
-          kubectl apply -f k8s```
+          kubectl apply -f k8s
+
+  cleanup:
+    needs: eks-deploy
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v3
+      - uses: aws-actions/configure-aws-credentials@v1
+        with:
+          aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
+          aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+          aws-region: ${{ secrets.AWS_REGION || 'us-east-1' }}
+      - name: Set up Terraform
+        uses: hashicorp/setup-terraform@v1
+        with:
+          terraform_version: 1.5.0
+      - name: Terraform Destroy
+        run: |
+          cd terraform
+          terraform destroy -auto-approve
