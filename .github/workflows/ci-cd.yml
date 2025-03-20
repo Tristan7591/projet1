@@ -21,7 +21,7 @@ jobs:
             gh workflow view "$file" >/dev/null
           done
 
-  # APPLICATION JOBS
+  # APPLICATION TESTS
   app-test:
     needs: validate
     runs-on: ubuntu-latest
@@ -37,16 +37,12 @@ jobs:
           cd application
           mvn test
 
-  app-security:
+  # BUILD IMAGES (Nécessaire avant le scan Trivy)
+  build-images:
     needs: validate
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v3
-      - name: OWASP Dependency Check
-        uses: jeremylong/DependencyCheck@v6.5.3
-        with:
-          project: "Application"
-          scan: "application"
       - name: Build Backend Docker Image
         run: |
           cd application
@@ -55,22 +51,34 @@ jobs:
         run: |
           cd application/frontend
           docker build -t frontend:latest .
-      - name: Trivy Scan Backend
-        uses: aquasecurity/trivy-action@v0.30.0
+
+  # SCAN DE SÉCURITÉ (Trivy ne s'exécute qu'après le build)
+  scan-security:
+    needs: build-images
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v3
+      - name: OWASP Dependency Check
+        uses: jeremylong/DependencyCheck@v6.5.3
+        with:
+          project: "Application"
+          scan: "application"
+      - name: Run Trivy Scan Backend
+        uses: aquasecurity/trivy-action@latest
         with:
           image-ref: "backend:latest"
           severity: "HIGH,CRITICAL"
           ignore-unfixed: true
-      - name: Trivy Scan Frontend
-        uses: aquasecurity/trivy-action@v0.30.0
+      - name: Run Trivy Scan Frontend
+        uses: aquasecurity/trivy-action@latest
         with:
           image-ref: "frontend:latest"
           severity: "HIGH,CRITICAL"
           ignore-unfixed: true
 
-  # PUSH TO ECR
+  # PUSH TO ECR (Nécessite un scan réussi)
   push-to-ecr:
-    needs: [app-test, app-security]
+    needs: [app-test, scan-security]
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v3
@@ -83,30 +91,30 @@ jobs:
       - name: Login to Amazon ECR
         id: login-ecr
         uses: aws-actions/amazon-ecr-login@v1
-      - name: Build and Push Backend Image
+      - name: Push Backend Image
         env:
           ECR_REGISTRY: ${{ steps.login-ecr.outputs.registry }}
           ECR_REPOSITORY: digital-store/backend
           IMAGE_TAG: ${{ github.sha }}
         run: |
           cd application
-          docker build -t $ECR_REGISTRY/$ECR_REPOSITORY:$IMAGE_TAG .
+          docker tag backend:latest $ECR_REGISTRY/$ECR_REPOSITORY:$IMAGE_TAG
           docker push $ECR_REGISTRY/$ECR_REPOSITORY:$IMAGE_TAG
           docker tag $ECR_REGISTRY/$ECR_REPOSITORY:$IMAGE_TAG $ECR_REGISTRY/$ECR_REPOSITORY:latest
           docker push $ECR_REGISTRY/$ECR_REPOSITORY:latest
-      - name: Build and Push Frontend Image
+      - name: Push Frontend Image
         env:
           ECR_REGISTRY: ${{ steps.login-ecr.outputs.registry }}
           ECR_REPOSITORY: digital-store/frontend
           IMAGE_TAG: ${{ github.sha }}
         run: |
           cd application/frontend
-          docker build -t $ECR_REGISTRY/$ECR_REPOSITORY:$IMAGE_TAG .
+          docker tag frontend:latest $ECR_REGISTRY/$ECR_REPOSITORY:$IMAGE_TAG
           docker push $ECR_REGISTRY/$ECR_REPOSITORY:$IMAGE_TAG
           docker tag $ECR_REGISTRY/$ECR_REPOSITORY:$IMAGE_TAG $ECR_REGISTRY/$ECR_REPOSITORY:latest
           docker push $ECR_REGISTRY/$ECR_REPOSITORY:latest
 
-  # INFRASTRUCTURE JOBS
+  # INFRASTRUCTURE DEPLOYMENT
   terraform-deploy:
     needs: push-to-ecr
     runs-on: ubuntu-latest
@@ -116,40 +124,13 @@ jobs:
         uses: hashicorp/setup-terraform@v1
         with:
           terraform_version: 1.5.0
-      - name: Configure AWS credentials
-        uses: aws-actions/configure-aws-credentials@v1
-        with:
-          aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
-          aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
-          aws-region: ${{ secrets.AWS_REGION || 'us-east-1' }}
-      - name: Create terraform.tfvars
-        run: |
-          cd terraform
-          cat > terraform.tfvars << EOF
-          # AWS Credentials
-          aws_region         = "${{ secrets.AWS_REGION || 'us-east-1' }}"
-          
-          # Application
-          environment        = "production"
-          
-          # Database
-          db_username        = "admin"
-          db_password        = "${{ secrets.DB_PASSWORD }}"
-          EOF
-      - name: Terraform Init
+      - name: Terraform Init & Apply
         run: |
           cd terraform
           terraform init
-      - name: Terraform Plan
-        run: |
-          cd terraform
-          terraform plan
-      - name: Terraform Apply
-        run: |
-          cd terraform
           terraform apply -auto-approve
 
-  # EKS DEPLOYMENT
+  # KUBERNETES DEPLOYMENT
   eks-deploy:
     needs: terraform-deploy
     runs-on: ubuntu-latest
@@ -164,44 +145,14 @@ jobs:
       - name: Login to Amazon ECR
         id: login-ecr
         uses: aws-actions/amazon-ecr-login@v1
-      - name: Update kubeconfig
-        run: aws eks update-kubeconfig --name digital-store-cluster --region ${{ secrets.AWS_REGION || 'us-east-1' }}
-      - name: Update Kubernetes manifest with new image tags
+      - name: Update Kubernetes manifests & Deploy
         env:
           IMAGE_TAG: ${{ github.sha }}
           ECR_REGISTRY: ${{ steps.login-ecr.outputs.registry }}
         run: |
-          # Update backend deployment with new image tag
           sed -i "s|image:.*digital-store/backend:.*|image: $ECR_REGISTRY/digital-store/backend:$IMAGE_TAG|g" k8s/backend/deployment.yaml
-          # Update frontend deployment with new image tag
           sed -i "s|image:.*digital-store/frontend:.*|image: $ECR_REGISTRY/digital-store/frontend:$IMAGE_TAG|g" k8s/frontend/deployment.yaml
-      - name: Deploy to EKS
-        run: |
-          # Attendre que le EBS CSI Driver soit prêt
-          kubectl -n kube-system wait deployment/ebs-csi-controller --for=condition=available --timeout=300s || true
-          
-          # Créer postgres-credentials s'il n'existe pas déjà
-          kubectl get secret postgres-credentials || kubectl create secret generic postgres-credentials \
-            --from-literal=POSTGRES_DB=digitalstore \
-            --from-literal=POSTGRES_USER=admin \
-            --from-literal=POSTGRES_PASSWORD=${{ secrets.DB_PASSWORD }} \
-            --from-literal=POSTGRES_HOST=digital-store-db.${{ secrets.AWS_REGION }}.rds.amazonaws.com
-          
-          # Déployer les ressources
-          kubectl apply -f k8s/database/postgres/storage.yaml
-          kubectl apply -f k8s/database/postgres/deployment.yaml
-          kubectl apply -f k8s/database/postgres/service.yaml
-          kubectl apply -f k8s/configmap.yaml
           kubectl apply -f k8s/backend/deployment.yaml
-          kubectl apply -f k8s/backend/service.yaml
           kubectl apply -f k8s/frontend/deployment.yaml
-          kubectl apply -f k8s/frontend/service.yaml
-          kubectl apply -f k8s/ingress/ingress.yaml
-          
-          # Vérifier le statut des déploiements
-          kubectl wait --for=condition=ready pod -l app=postgres --timeout=300s || true
           kubectl rollout status deployment/digital-store-backend
           kubectl rollout status deployment/digital-store-frontend
-          
-          echo "Deployment completed successfully!"
-          echo "Application will be available at: https://${DOMAIN_NAME} (once DNS is configured)"
