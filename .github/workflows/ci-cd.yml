@@ -61,12 +61,14 @@ jobs:
           image-ref: "backend:latest"
           severity: "HIGH,CRITICAL"
           ignore-unfixed: true
+          cache: false
       - name: Trivy Scan Frontend
         uses: aquasecurity/trivy-action@v0.30.0
         with:
           image-ref: "frontend:latest"
           severity: "HIGH,CRITICAL"
           ignore-unfixed: true
+          cache: false
 
   # PUSH TO ECR
   push-to-ecr:
