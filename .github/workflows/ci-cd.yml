@@ -7,7 +7,6 @@ on:
     branches: [ main ]
 
 jobs:
-  # VALIDATION
   validate:
     runs-on: ubuntu-latest
     steps:
@@ -17,11 +16,9 @@ jobs:
           GH_TOKEN: ${{ github.token }}
         run: |
           for file in .github/workflows/*.yml; do
-            echo "Validating $file"
             gh workflow view "$file" >/dev/null
           done
 
-  # APPLICATION JOBS
   app-test:
     needs: validate
     runs-on: ubuntu-latest
@@ -31,9 +28,7 @@ jobs:
         uses: actions/setup-java@v3
         with:
           java-version: '17'
-          distribution: 'adopt'
-      - name: Build and Test
-        run: |
+      - run: |
           cd application
           mvn test
 
@@ -42,144 +37,108 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v3
+
       - name: OWASP Dependency Check Backend
-        uses: dependency-check/Dependency-Check_Action@v1.1.0
+        uses: dependency-check/Dependency-Check_Action@main
+        env:
+          JAVA_HOME: /opt/jdk
         with:
           project: "Application Backend"
           path: "application"
           format: "HTML"
           args: "--failOnCVSS 7"
+
       - name: OWASP Dependency Check Frontend
-        uses: dependency-check/Dependency-Check_Action@v1.1.0
+        uses: dependency-check/Dependency-Check_Action@main
+        env:
+          JAVA_HOME: /opt/jdk
         with:
           project: "Application Frontend"
           path: "application/frontend"
           format: "HTML"
           args: "--failOnCVSS 7"
+
       - name: Build Backend Docker Image
         run: |
           cd application
           docker build -t backend:latest .
+
       - name: Build Frontend Docker Image
         run: |
           cd application/frontend
           docker build -t frontend:latest .
 
-  # PUSH TO ECR
   push-to-ecr:
     needs: [app-test, app-security]
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v3
-      - name: Configure AWS credentials
-        uses: aws-actions/configure-aws-credentials@v1
+      - uses: aws-actions/configure-aws-credentials@v1
         with:
           aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
           aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
           aws-region: ${{ secrets.AWS_REGION || 'us-east-1' }}
-      - name: Login to Amazon ECR
-        id: login-ecr
-        uses: aws-actions/amazon-ecr-login@v1
-      - name: Build and Push Backend Image
+      - uses: aws-actions/amazon-ecr-login@v1
+      - name: Push Backend Image
         env:
           ECR_REGISTRY: ${{ steps.login-ecr.outputs.registry }}
           ECR_REPOSITORY: digital-store/backend
           IMAGE_TAG: ${{ github.sha }}
         run: |
           cd application
-          docker build -t $ECR_REGISTRY/$ECR_REPOSITORY:$IMAGE_TAG .
+          docker tag backend:latest $ECR_REGISTRY/$ECR_REPOSITORY:$IMAGE_TAG
           docker push $ECR_REGISTRY/$ECR_REPOSITORY:$IMAGE_TAG
           docker tag $ECR_REGISTRY/$ECR_REPOSITORY:$IMAGE_TAG $ECR_REGISTRY/$ECR_REPOSITORY:latest
           docker push $ECR_REGISTRY/$ECR_REPOSITORY:latest
-      - name: Build and Push Frontend Image
+      - name: Push Frontend Image
         env:
           ECR_REGISTRY: ${{ steps.login-ecr.outputs.registry }}
           ECR_REPOSITORY: digital-store/frontend
           IMAGE_TAG: ${{ github.sha }}
         run: |
           cd application/frontend
-          docker build -t $ECR_REGISTRY/$ECR_REPOSITORY:$IMAGE_TAG .
+          docker tag frontend:latest $ECR_REGISTRY/$ECR_REPOSITORY:$IMAGE_TAG
           docker push $ECR_REGISTRY/$ECR_REPOSITORY:$IMAGE_TAG
           docker tag $ECR_REGISTRY/$ECR_REPOSITORY:$IMAGE_TAG $ECR_REGISTRY/$ECR_REPOSITORY:latest
           docker push $ECR_REGISTRY/$ECR_REPOSITORY:latest
 
-  # INFRASTRUCTURE JOBS
   terraform-deploy:
     needs: push-to-ecr
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v3
-      - name: Set up Terraform
-        uses: hashicorp/setup-terraform@v1
+      - uses: hashicorp/setup-terraform@v1
         with:
           terraform_version: 1.5.0
-      - name: Configure AWS credentials
-        uses: aws-actions/configure-aws-credentials@v1
+      - uses: aws-actions/configure-aws-credentials@v1
         with:
           aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
           aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
           aws-region: ${{ secrets.AWS_REGION || 'us-east-1' }}
-      - name: Create terraform.tfvars
-        run: |
-          cd terraform
-          cat > terraform.tfvars << EOF
-          # AWS Credentials
-          aws_region         = "${{ secrets.AWS_REGION || 'us-east-1' }}"
-          
-          # Application
-          environment        = "production"
-          
-          # Database
-          db_username        = "admin"
-          db_password        = "${{ secrets.DB_PASSWORD }}"
-          EOF
-      - name: Terraform Init
+      - name: Terraform Init & Apply
         run: |
           cd terraform
           terraform init
-      - name: Terraform Plan
-        run: |
-          cd terraform
-          terraform plan
-      - name: Terraform Apply
-        run: |
-          cd terraform
           terraform apply -auto-approve
 
-  # EKS DEPLOYMENT
   eks-deploy:
     needs: terraform-deploy
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v3
-      - name: Configure AWS Credentials
-        uses: aws-actions/configure-aws-credentials@v1
+      - uses: aws-actions/configure-aws-credentials@v1
         with:
           aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
           aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
           aws-region: ${{ secrets.AWS_REGION || 'us-east-1' }}
-      - name: Login to Amazon ECR
-        id: login-ecr
-        uses: aws-actions/amazon-ecr-login@v1
-      - name: Update kubeconfig
-        run: aws eks update-kubeconfig --name digital-store-cluster --region ${{ secrets.AWS_REGION || 'us-east-1' }}
-      - name: Update Kubernetes manifest with new image tags
+      - uses: aws-actions/amazon-ecr-login@v1
+      - run: aws eks update-kubeconfig --name digital-store-cluster --region ${{ secrets.AWS_REGION || 'us-east-1' }}
+      - name: Deploy to EKS
         env:
           IMAGE_TAG: ${{ github.sha }}
           ECR_REGISTRY: ${{ steps.login-ecr.outputs.registry }}
         run: |
           sed -i "s|image:.*digital-store/backend:.*|image: $ECR_REGISTRY/digital-store/backend:$IMAGE_TAG|g" k8s/backend/deployment.yaml
           sed -i "s|image:.*digital-store/frontend:.*|image: $ECR_REGISTRY/digital-store/frontend:$IMAGE_TAG|g" k8s/frontend/deployment.yaml
-      - name: Deploy to EKS
-        run: |
-          kubectl apply -f k8s/database/postgres/storage.yaml
-          kubectl apply -f k8s/database/postgres/deployment.yaml
-          kubectl apply -f k8s/database/postgres/service.yaml
-          kubectl apply -f k8s/configmap.yaml
-          kubectl apply -f k8s/backend/deployment.yaml
-          kubectl apply -f k8s/backend/service.yaml
-          kubectl apply -f k8s/frontend/deployment.yaml
-          kubectl apply -f k8s/frontend/service.yaml
-          kubectl apply -f k8s/ingress/ingress.yaml
-          kubectl rollout status deployment/digital-store-backend
-          kubectl rollout status deployment/digital-store-frontend
+          kubectl apply -f k8s
+
