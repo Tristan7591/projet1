@@ -64,13 +64,13 @@ jobs:
           project: "Application"
           scan: "application"
       - name: Run Trivy Scan Backend
-        uses: aquasecurity/trivy-action@0.29.0
+        uses: aquasecurity/trivy-action@0.27.0
         with:
           image-ref: "backend:latest"
           severity: "HIGH,CRITICAL"
           ignore-unfixed: true
       - name: Run Trivy Scan Frontend
-        uses: aquasecurity/trivy-action@0.29.0
+        uses: aquasecurity/trivy-action@0.27.0
         with:
           image-ref: "frontend:latest"
           severity: "HIGH,CRITICAL"
