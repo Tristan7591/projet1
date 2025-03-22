@@ -7,7 +7,7 @@ on:
     branches: [ main ]
 
 env:
-  AWS_REGION: us-east-1  # change if needed
+  AWS_REGION: us-east-1
 
 jobs:
   validate:
@@ -69,8 +69,38 @@ jobs:
           cd application/frontend
           docker build -t frontend:latest .
 
-  push-to-ecr:
+  security-checks:
     needs: [app-test, app-security]
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v3
+
+      - name: Run TFSec on Terraform
+        uses: aquasecurity/tfsec-action@v1.0.0
+        with:
+          working_directory: terraform
+
+      - name: Run Semgrep
+        uses: returntocorp/semgrep-action@v1
+        with:
+          config: "auto"
+
+      - name: Run Gitleaks
+        uses: gitleaks/gitleaks-action@v2
+        with:
+          args: "--verbose --redact --source ."
+
+      - name: Install Grype
+        run: |
+          curl -sSfL https://raw.githubusercontent.com/anchore/grype/main/install.sh | sh -s -- -b /usr/local/bin
+
+      - name: Scan backend image with Grype
+        run: |
+          docker build -t backend-temp:latest ./application
+          grype backend-temp:latest --fail-on high
+
+  push-to-ecr:
+    needs: security-checks
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v3
@@ -104,46 +134,20 @@ jobs:
           docker push $ECR_REGISTRY/$ECR_REPOSITORY:$IMAGE_TAG
           docker tag $ECR_REGISTRY/$ECR_REPOSITORY:$IMAGE_TAG $ECR_REGISTRY/$ECR_REPOSITORY:latest
           docker push $ECR_REGISTRY/$ECR_REPOSITORY:latest
-          
-  terraform-backend-setup:
-    runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@v3
-
-      - name: Set up Terraform
-        uses: hashicorp/setup-terraform@v1
-        with:
-          terraform_version: 1.5.0
-
-      - name: Configure AWS credentials
-        uses: aws-actions/configure-aws-credentials@v1
-        with:
-          aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
-          aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
-          aws-region: ${{ env.AWS_REGION }}
-
-      - name: Apply state setup (S3 & DynamoDB)
-        run: |
-          cd terraform
-          terraform init
-          terraform apply -target=null_resource.wait_for_backend_ready -auto-approve
 
   terraform-deploy:
-    needs: terraform-backend-setup
+    needs: push-to-ecr
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v3
-
       - uses: hashicorp/setup-terraform@v1
         with:
           terraform_version: 1.5.0
-
       - uses: aws-actions/configure-aws-credentials@v1
         with:
           aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
           aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
           aws-region: ${{ env.AWS_REGION }}
-
       - name: Get db_password from AWS SSM
         id: get-db-password
         run: |
@@ -153,36 +157,11 @@ jobs:
             --query "Parameter.Value" \
             --output text)
           echo "TF_VAR_db_password=$DB_PASSWORD" >> $GITHUB_ENV
-
       - name: Terraform Init & Apply
         run: |
           cd terraform
           terraform init
           terraform apply -auto-approve
-
-
-  terraform-cleanup:
-    needs: terraform-deploy
-    if: failure()
-    runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@v3
-
-      - uses: hashicorp/setup-terraform@v1
-        with:
-          terraform_version: 1.5.0
-
-      - uses: aws-actions/configure-aws-credentials@v1
-        with:
-          aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
-          aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
-          aws-region: ${{ env.AWS_REGION }}
-
-      - name: Terraform Destroy on Failure
-        run: |
-          cd terraform
-          terraform init
-          terraform destroy -auto-approve
 
   eks-deploy:
     needs: terraform-deploy
@@ -205,3 +184,23 @@ jobs:
           sed -i "s|image:.*digital-store/backend:.*|image: $ECR_REGISTRY/tristan:$IMAGE_TAG|g" k8s/backend/deployment.yaml
           sed -i "s|image:.*digital-store/frontend:.*|image: $ECR_REGISTRY/tristan-fronted:$IMAGE_TAG|g" k8s/frontend/deployment.yaml
           kubectl apply -f k8s
+
+  terraform-cleanup:
+    needs: terraform-deploy
+    if: failure()
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v3
+      - uses: hashicorp/setup-terraform@v1
+        with:
+          terraform_version: 1.5.0
+      - uses: aws-actions/configure-aws-credentials@v1
+        with:
+          aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
+          aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+          aws-region: ${{ env.AWS_REGION }}
+      - name: Terraform Destroy on Failure
+        run: |
+          cd terraform
+          terraform init
+          terraform destroy -auto-approve
