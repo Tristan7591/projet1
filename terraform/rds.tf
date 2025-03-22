@@ -1,7 +1,7 @@
 resource "aws_db_instance" "postgres" {
   identifier           = "digital-store-db"
   engine              = "postgres"
-  engine_version      = "14.7"
+  engine_version      = "15.12"    #version stable
   instance_class      = var.db_instance_class
   allocated_storage   = var.db_allocated_storage
   
