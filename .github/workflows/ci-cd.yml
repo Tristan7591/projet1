@@ -187,21 +187,111 @@ jobs:
           kubectl apply -f k8s
 
   terraform-cleanup:
-    needs: terraform-deploy
-    if: failure()
+    needs: [terraform-deploy, eks-deploy, validate-infra, wait-and-validate]
+    if: ${{ always() }}
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v3
+
       - uses: hashicorp/setup-terraform@v1
         with:
           terraform_version: 1.5.0
+
       - uses: aws-actions/configure-aws-credentials@v1
         with:
           aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
           aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
           aws-region: ${{ env.AWS_REGION }}
-      - name: Terraform Destroy on Failure
+
+      - name: Get db_password from AWS SSM
+        run: |
+          DB_PASSWORD=$(aws ssm get-parameter \
+            --name "/terraform/db_password" \
+            --with-decryption \
+            --query "Parameter.Value" \
+            --output text)
+          echo "TF_VAR_db_password=$DB_PASSWORD" >> $GITHUB_ENV
+
+      - name: Terraform Refresh & Destroy
+        if: >
+          ${{
+            needs.terraform-deploy.result == 'failure' ||
+            needs.eks-deploy.result == 'failure' ||
+            needs.validate-infra.result == 'failure' ||
+            needs.wait-and-validate.result == 'failure'
+          }}
         run: |
           cd terraform
           terraform init
-          terraform destroy -auto-approve
+          terraform refresh || true
+          terraform destroy -auto-approve || true
+
+      - name: Fallback Cleanup for digital* resources
+        if: >
+          ${{
+            needs.terraform-deploy.result == 'failure' ||
+            needs.eks-deploy.result == 'failure' ||
+            needs.validate-infra.result == 'failure' ||
+            needs.wait-and-validate.result == 'failure'
+          }}
+        run: |
+          echo "Nettoyage manuel des ressources contenant 'digital'"
+
+          # --- EKS Clusters contenant 'digital' ---
+          for CLUSTER in $(aws eks list-clusters --query "clusters[]" --output text); do
+            if [[ $CLUSTER == digital* ]]; then
+              echo "Suppression du cluster EKS: $CLUSTER"
+              aws eks delete-cluster --name $CLUSTER || true
+            fi
+          done
+
+          # --- RDS Instances contenant 'digital' ---
+          for DB in $(aws rds describe-db-instances --query "DBInstances[].DBInstanceIdentifier" --output text); do
+            if [[ $DB == digital* ]]; then
+              echo "Suppression de l'instance RDS: $DB"
+              aws rds delete-db-instance --db-instance-identifier $DB --skip-final-snapshot || true
+            fi
+          done
+
+          # --- Subnet Groups RDS ---
+          for SGROUP in $(aws rds describe-db-subnet-groups --query "DBSubnetGroups[].DBSubnetGroupName" --output text); do
+            if [[ $SGROUP == digital* ]]; then
+              echo "Suppression du DB Subnet Group: $SGROUP"
+              aws rds delete-db-subnet-group --db-subnet-group-name $SGROUP || true
+            fi
+          done
+
+          # --- Load Balancers ---
+          for LB_ARN in $(aws elbv2 describe-load-balancers --query "LoadBalancers[?contains(DNSName, 'digital')].LoadBalancerArn" --output text); do
+            echo "Suppression du load balancer: $LB_ARN"
+            aws elbv2 delete-load-balancer --load-balancer-arn "$LB_ARN" || true
+          done
+
+          # --- Target Groups ---
+          for TG_ARN in $(aws elbv2 describe-target-groups --query "TargetGroups[?starts_with(TargetGroupName, 'digital')].TargetGroupArn" --output text); do
+            echo "Suppression du target group: $TG_ARN"
+            aws elbv2 delete-target-group --target-group-arn "$TG_ARN" || true
+          done
+
+          # --- IAM Roles ---
+          ROLES=$(aws iam list-roles --query "Roles[?contains(RoleName, 'digital')].RoleName" --output text)
+          for ROLE in $ROLES; do
+            echo "Traitement du rôle IAM: $ROLE"
+            
+            POLICIES=$(aws iam list-attached-role-policies --role-name "$ROLE" --query "AttachedPolicies[].PolicyArn" --output text)
+            for POLICY_ARN in $POLICIES; do
+              echo " - Détachement de la policy: $POLICY_ARN"
+              aws iam detach-role-policy --role-name "$ROLE" --policy-arn "$POLICY_ARN" || true
+            done
+
+            INLINE_POLICIES=$(aws iam list-role-policies --role-name "$ROLE" --query "PolicyNames[]" --output text)
+            for INLINE in $INLINE_POLICIES; do
+              echo " - Suppression de la inline policy: $INLINE"
+              aws iam delete-role-policy --role-name "$ROLE" --policy-name "$INLINE" || true
+            done
+
+            aws iam delete-role --role-name "$ROLE" || true
+            echo "Rôle $ROLE supprimé"
+          done
+
+          echo "Fallback cleanup digital* terminé."
