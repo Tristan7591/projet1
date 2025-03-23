@@ -187,8 +187,8 @@ jobs:
           kubectl apply -f k8s
 
   terraform-cleanup:
-    needs: [terraform-deploy, eks-deploy, validate-infra, wait-and-validate]
     if: ${{ always() }}
+    needs: [terraform-deploy, eks-deploy, validate-infra, wait-and-validate]
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v3
@@ -214,12 +214,10 @@ jobs:
 
       - name: Terraform Refresh & Destroy
         if: >
-          ${{
-            needs.terraform-deploy.result == 'failure' ||
-            needs.eks-deploy.result == 'failure' ||
-            needs.validate-infra.result == 'failure' ||
-            needs.wait-and-validate.result == 'failure'
-          }}
+          ${{ needs.terraform-deploy.result == 'failure' ||
+              needs.eks-deploy.result == 'failure' ||
+              needs.validate-infra.result == 'failure' ||
+              needs.wait-and-validate.result == 'failure' }}
         run: |
           cd terraform
           terraform init
@@ -228,16 +226,13 @@ jobs:
 
       - name: Fallback Cleanup for digital* resources
         if: >
-          ${{
-            needs.terraform-deploy.result == 'failure' ||
-            needs.eks-deploy.result == 'failure' ||
-            needs.validate-infra.result == 'failure' ||
-            needs.wait-and-validate.result == 'failure'
-          }}
+          ${{ needs.terraform-deploy.result == 'failure' ||
+              needs.eks-deploy.result == 'failure' ||
+              needs.validate-infra.result == 'failure' ||
+              needs.wait-and-validate.result == 'failure' }}
         run: |
           echo "Nettoyage manuel des ressources contenant 'digital'"
 
-          # --- EKS Clusters contenant 'digital' ---
           for CLUSTER in $(aws eks list-clusters --query "clusters[]" --output text); do
             if [[ $CLUSTER == digital* ]]; then
               echo "Suppression du cluster EKS: $CLUSTER"
@@ -245,7 +240,6 @@ jobs:
             fi
           done
 
-          # --- RDS Instances contenant 'digital' ---
           for DB in $(aws rds describe-db-instances --query "DBInstances[].DBInstanceIdentifier" --output text); do
             if [[ $DB == digital* ]]; then
               echo "Suppression de l'instance RDS: $DB"
@@ -253,7 +247,6 @@ jobs:
             fi
           done
 
-          # --- Subnet Groups RDS ---
           for SGROUP in $(aws rds describe-db-subnet-groups --query "DBSubnetGroups[].DBSubnetGroupName" --output text); do
             if [[ $SGROUP == digital* ]]; then
               echo "Suppression du DB Subnet Group: $SGROUP"
@@ -261,23 +254,20 @@ jobs:
             fi
           done
 
-          # --- Load Balancers ---
           for LB_ARN in $(aws elbv2 describe-load-balancers --query "LoadBalancers[?contains(DNSName, 'digital')].LoadBalancerArn" --output text); do
             echo "Suppression du load balancer: $LB_ARN"
             aws elbv2 delete-load-balancer --load-balancer-arn "$LB_ARN" || true
           done
 
-          # --- Target Groups ---
           for TG_ARN in $(aws elbv2 describe-target-groups --query "TargetGroups[?starts_with(TargetGroupName, 'digital')].TargetGroupArn" --output text); do
             echo "Suppression du target group: $TG_ARN"
             aws elbv2 delete-target-group --target-group-arn "$TG_ARN" || true
           done
 
-          # --- IAM Roles ---
           ROLES=$(aws iam list-roles --query "Roles[?contains(RoleName, 'digital')].RoleName" --output text)
           for ROLE in $ROLES; do
             echo "Traitement du rôle IAM: $ROLE"
-            
+
             POLICIES=$(aws iam list-attached-role-policies --role-name "$ROLE" --query "AttachedPolicies[].PolicyArn" --output text)
             for POLICY_ARN in $POLICIES; do
               echo " - Détachement de la policy: $POLICY_ARN"
