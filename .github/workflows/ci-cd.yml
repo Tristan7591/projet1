@@ -5,6 +5,12 @@ on:
     branches: [ main ]
   pull_request:
     branches: [ main ]
+  workflow_dispatch:
+    inputs:
+      immediate_cleanup:
+        description: "Trigger cleanup immediately"
+        required: false
+        default: "false"
 
 env:
   AWS_REGION: us-east-1
@@ -74,13 +80,11 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v3
-
       - name: Run TFSec on Terraform
         uses: aquasecurity/tfsec-action@v1.0.0
         with:
           working_directory: terraform
         continue-on-error: true
-
       - name: Run Semgrep
         uses: returntocorp/semgrep-action@v1
         with:
@@ -90,11 +94,9 @@ jobs:
         uses: gitleaks/gitleaks-action@v2
         with:
           args: "--verbose --redact --source ."
-
       - name: Install Grype
         run: |
           curl -sSfL https://raw.githubusercontent.com/anchore/grype/main/install.sh | sh -s -- -b /usr/local/bin
-
       - name: Scan backend image with Grype
         continue-on-error: true
         run: |
@@ -170,17 +172,14 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v3
-
       - name: Configure AWS credentials
         uses: aws-actions/configure-aws-credentials@v1
         with:
           aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
           aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
           aws-region: ${{ env.AWS_REGION }}
-
       - name: Update kubeconfig
         run: aws eks update-kubeconfig --name digital-store-cluster --region ${{ env.AWS_REGION }}
-
       - name: Deploy to EKS
         env:
           IMAGE_TAG: ${{ github.sha }}
@@ -206,17 +205,20 @@ jobs:
       - name: Update kubeconfig
         run: aws eks update-kubeconfig --name digital-store-cluster --region ${{ env.AWS_REGION }}
 
-      - name: Verify pods are Ready
-        run: |
-          kubectl get pods -A
-          kubectl wait --for=condition=Ready pod -l app=digital-store --timeout=180s -n default
-
       - name: Verify application health via ALB
         run: |
           ALB_HOST=$(kubectl get ingress digital-store-alb -n default -o jsonpath='{.status.loadBalancer.ingress[0].hostname}')
           echo "ALB URL: http://$ALB_HOST"
           sleep 120
           curl --fail http://$ALB_HOST/api/health
+
+      - name: Get Terraform Output for RDS Endpoint
+        id: rds-endpoint
+        run: |
+          cd terraform
+          terraform init
+          RDS_ENDPOINT=$(terraform output -raw endpoint)
+          echo "RDS_ENDPOINT=$RDS_ENDPOINT" >> $GITHUB_ENV
 
       - name: Get DB password from SSM
         id: get-db-password
@@ -225,34 +227,48 @@ jobs:
 
       - name: Verify RDS connectivity from cluster
         env:
-          RDS_ENDPOINT: ${{ steps.get-db-endpoint.outputs.endpoint }}
           DB_USER: ${{ secrets.DB_USERNAME }}
           DB_PASS: ${{ env.DB_PASSWORD }}
           DB_NAME: ${{ secrets.DB_NAME }}
+          RDS_ENDPOINT: ${{ env.RDS_ENDPOINT }}
         run: |
           POD=$(kubectl run tmp-psql --image=postgres:15 --restart=Never --command -- sleep 3600 -o name)
           kubectl exec $POD -- sh -c "apt-get update -qq && apt-get install -qq -y dnsutils netcat postgresql-client"
           kubectl exec $POD -- nslookup $RDS_ENDPOINT
           kubectl exec $POD -- nc -zv $RDS_ENDPOINT 5432
-          kubectl exec $POD -- psql postgresql://$DB_USER:$DB_PASS@$RDS_ENDPOINT:5432/$DB_NAME -c '\conninfo'
+          kubectl exec $POD -- psql postgresql://$DB_USER:$DB_PASS@$RDS_ENDPOINT:5432/$DB_NAME -c '\\conninfo'
           kubectl delete $POD
 
   terraform-cleanup:
-    needs: terraform-deploy
-    if: failure()
+    if: ${{ failure() || github.event_name == 'workflow_dispatch' || always() }}
+    needs: [terraform-deploy, eks-deploy, validate-infra]
     runs-on: ubuntu-latest
+    timeout-minutes: 20
     steps:
       - uses: actions/checkout@v3
-      - uses: hashicorp/setup-terraform@v1
-        with:
-          terraform_version: 1.5.0
+      - name: Wait 15 minutes unless override
+        if: ${{ github.event.inputs.immediate_cleanup != 'true' }}
+        run: |
+          echo "Waiting 15 minutes before cleanup unless skipped..."
+          sleep 900
       - uses: aws-actions/configure-aws-credentials@v1
         with:
           aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
           aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
           aws-region: ${{ env.AWS_REGION }}
-      - name: Terraform Destroy on Failure
+      - name: Cleanup AWS resources manually
         run: |
+          aws eks delete-nodegroup --cluster-name digital-store-cluster --nodegroup-name digital-store-node-group || true
+          aws eks delete-cluster --name digital-store-cluster || true
+          aws rds delete-db-instance --db-instance-identifier digital-store-db --skip-final-snapshot || true
+          aws ecr delete-repository --repository-name backend-repo --force || true
+          aws ecr delete-repository --repository-name frontend-repo --force || true
+          # Optionnel: nettoyage des SG, rôles IAM, politiques, ALB
+      - name: Destroy Terraform-managed resources
+        uses: hashicorp/setup-terraform@v1
+        with:
+          terraform_version: 1.5.0
+      - run: |
           cd terraform
           terraform init
           terraform destroy -auto-approve
