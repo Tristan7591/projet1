@@ -1,15 +1,18 @@
 apiVersion: networking.k8s.io/v1
 kind: Ingress
 metadata:
-  name: digital-store-ingress
-  namespace: default
+  name: {{ .Release.Name }}-alb
+  namespace: {{ .Release.Namespace }}
   annotations:
     kubernetes.io/ingress.class: alb
     alb.ingress.kubernetes.io/scheme: internet-facing
-    alb.ingress.kubernetes.io/listen-ports: '[{"HTTP":80}]'
-    alb.ingress.kubernetes.io/subnets: "${public_subnets}"
     alb.ingress.kubernetes.io/target-type: ip
+    alb.ingress.kubernetes.io/listen-ports: '[{"HTTP":80}]'
+    alb.ingress.kubernetes.io/healthcheck-path: /api/health
+    alb.ingress.kubernetes.io/healthcheck-port: "8080"
+    alb.ingress.kubernetes.io/healthcheck-protocol: HTTP
 spec:
+  ingressClassName: alb
   rules:
     - http:
         paths:
@@ -17,13 +20,13 @@ spec:
             pathType: Prefix
             backend:
               service:
-                name: digital-store-backend-service
+                name: {{ .Release.Name }}-backend-service
                 port:
                   number: 8080
           - path: /
             pathType: Prefix
             backend:
               service:
-                name: digital-store-frontend-service
+                name: {{ .Release.Name }}-frontend-service
                 port:
-                  number: 80 
+                  number: 3000

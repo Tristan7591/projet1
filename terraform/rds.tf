@@ -24,12 +24,12 @@ resource "aws_db_instance" "postgres" {
   skip_final_snapshot     = false
   final_snapshot_identifier = "${var.environment}-digital-store-final-snapshot"
   
-
-
+  performance_insights_enabled = true
+  monitoring_interval         = 60
+  
   tags = {
     Name        = "digital-store-db"
     Environment = var.environment
     Project     = "digital-store"
   }
 }
-

@@ -85,22 +85,21 @@ jobs:
         uses: returntocorp/semgrep-action@v1
         with:
           config: "auto"
-        continue-on-error: true
+
       - name: Run Gitleaks
         uses: gitleaks/gitleaks-action@v2
         with:
           args: "--verbose --redact --source ."
-      
+
       - name: Install Grype
         run: |
           curl -sSfL https://raw.githubusercontent.com/anchore/grype/main/install.sh | sh -s -- -b /usr/local/bin
 
       - name: Scan backend image with Grype
-        continue-on-error: true
         run: |
           docker build -t backend-temp:latest ./application
           grype backend-temp:latest --fail-on high
-        
+
   push-to-ecr:
     needs: security-checks
     runs-on: ubuntu-latest
@@ -170,21 +169,24 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v3
-      - uses: aws-actions/configure-aws-credentials@v1
+
+      - name: Configure AWS credentials
+        uses: aws-actions/configure-aws-credentials@v1
         with:
           aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
           aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
           aws-region: ${{ env.AWS_REGION }}
-      - uses: aws-actions/amazon-ecr-login@v2
+
       - name: Update kubeconfig
         run: aws eks update-kubeconfig --name digital-store-cluster --region ${{ env.AWS_REGION }}
+
       - name: Deploy to EKS
         env:
           IMAGE_TAG: ${{ github.sha }}
           ECR_REGISTRY: 797394900921.dkr.ecr.us-east-1.amazonaws.com
         run: |
-          sed -i "s|image:.*digital-store/backend:.*|image: $ECR_REGISTRY/tristan:$IMAGE_TAG|g" k8s/backend/deployment.yaml
-          sed -i "s|image:.*digital-store/frontend:.*|image: $ECR_REGISTRY/tristan-fronted:$IMAGE_TAG|g" k8s/frontend/deployment.yaml
+          sed -i "s|image:.*digital-store/backend:.*|image: $ECR_REGISTRY/backend-repo:$IMAGE_TAG|g" k8s/backend/deployment.yaml
+          sed -i "s|image:.*digital-store/frontend:.*|image: $ECR_REGISTRY/frontend-repo:$IMAGE_TAG|g" k8s/frontend/deployment.yaml
           kubectl apply -f k8s
 
   validate-infra:
@@ -203,53 +205,52 @@ jobs:
       - name: Update kubeconfig
         run: aws eks update-kubeconfig --name digital-store-cluster --region ${{ env.AWS_REGION }}
 
-      - name: Verify pods are Running
+      - name: Verify pods are Ready
         run: |
           kubectl get pods -A
-          if ! kubectl get pods -A | grep -q "Running"; then
-            echo "Some pods are not in Running state"
-            exit 1
-          fi
+          kubectl wait --for=condition=Ready pod -l app=digital-store --timeout=180s -n default
 
       - name: Verify application health via ALB
         run: |
-          ALB_HOST=$(kubectl get svc -n default -o jsonpath='{.items[?(@.metadata.name=="my-service")].status.loadBalancer.ingress[0].hostname}')
+          ALB_HOST=$(kubectl get ingress digital-store-alb -n default -o jsonpath='{.status.loadBalancer.ingress[0].hostname}')
           echo "ALB URL: http://$ALB_HOST"
-          sleep 30
-          curl --fail http://$ALB_HOST/health
+          sleep 120
+          curl --fail http://$ALB_HOST/api/health
 
-      - name: Verify RDS connectivity
+      - name: Get DB password from SSM
+        id: get-db-password
         run: |
-          RDS_ENDPOINT=$(aws rds describe-db-instances \
-            --query "DBInstances[?DBInstanceIdentifier=='digital-store-db'].Endpoint.Address" \
-            --output text)
-          echo "RDS endpoint: $RDS_ENDPOINT"
-          nslookup $RDS_ENDPOINT
+          echo "DB_PASSWORD=$(aws ssm get-parameter --name \"/terraform/db_password\" --with-decryption --query Parameter.Value --output text)" >> $GITHUB_ENV
+
+      - name: Verify RDS connectivity from cluster
+        env:
+          RDS_ENDPOINT: ${{ steps.get-db-endpoint.outputs.endpoint }}
+          DB_USER: ${{ secrets.DB_USERNAME }}
+          DB_PASS: ${{ env.DB_PASSWORD }}
+          DB_NAME: ${{ secrets.DB_NAME }}
+        run: |
+          POD=$(kubectl run tmp-psql --image=postgres:15 --restart=Never --command -- sleep 3600 -o name)
+          kubectl exec $POD -- sh -c "apt-get update -qq && apt-get install -qq -y dnsutils netcat postgresql-client"
+          kubectl exec $POD -- nslookup $RDS_ENDPOINT
+          kubectl exec $POD -- nc -zv $RDS_ENDPOINT 5432
+          kubectl exec $POD -- psql postgresql://$DB_USER:$DB_PASS@$RDS_ENDPOINT:5432/$DB_NAME -c '\conninfo'
+          kubectl delete $POD
 
   terraform-cleanup:
-    if: ${{ always() }}
-    needs: [terraform-deploy, eks-deploy, validate-infra]
+    needs: terraform-deploy
+    if: failure()
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v3
-
       - uses: hashicorp/setup-terraform@v1
         with:
           terraform_version: 1.5.0
-
       - uses: aws-actions/configure-aws-credentials@v1
         with:
           aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
           aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
           aws-region: ${{ env.AWS_REGION }}
-
-      - name: Get db_password from SSM
-        run: |
-          DB_PASSWORD=$(aws ssm get-parameter --name "/terraform/db_password" --with-decryption --query "Parameter.Value" --output text)
-          echo "TF_VAR_db_password=$DB_PASSWORD" >> $GITHUB_ENV
-
-      - name: Terraform destroy on failure
-        if: ${{ failure() }}
+      - name: Terraform Destroy on Failure
         run: |
           cd terraform
           terraform init
