@@ -89,8 +89,10 @@ jobs:
       - name: Run Gitleaks
         uses: gitleaks/gitleaks-action@v2
         with:
-          args: "--verbose --redact --source ."
-
+          scan-dir: .
+          redact: true
+          verbose: true
+          
       - name: Install Grype
         run: |
           curl -sSfL https://raw.githubusercontent.com/anchore/grype/main/install.sh | sh -s -- -b /usr/local/bin
