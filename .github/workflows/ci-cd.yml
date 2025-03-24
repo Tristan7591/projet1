@@ -255,6 +255,12 @@ jobs:
           aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
           aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
           aws-region: ${{ env.AWS_REGION }}
+      - name: Short delay before immediate cleanup
+        if: ${{ github.event.inputs.immediate_cleanup == 'true' }}
+        run: |
+          echo "Delaying immediate cleanup by 60 seconds..."
+          sleep 60
+
       - name: Cleanup AWS resources manually
         run: |
           aws eks delete-nodegroup --cluster-name digital-store-cluster --nodegroup-name digital-store-node-group || true
