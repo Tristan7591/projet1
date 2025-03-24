@@ -16,13 +16,13 @@ resource "aws_db_instance" "postgres" {
   storage_encrypted   = true
   storage_type        = "gp3"
   
-  backup_retention_period = 7
-  backup_window          = "03:00-04:00"
-  maintenance_window     = "Mon:04:00-Mon:05:00"
+  #backup_retention_period = 7
+  #backup_window          = "03:00-04:00"
+  #maintenance_window     = "Mon:04:00-Mon:05:00"
   
-  deletion_protection     = true
-  skip_final_snapshot     = false
-  final_snapshot_identifier = "${var.environment}-digital-store-final-snapshot"
+  deletion_protection     = false
+  skip_final_snapshot     = true
+  #final_snapshot_identifier = "${var.environment}-digital-store-final-snapshot"
   
   performance_insights_enabled = true
   monitoring_interval         = 60
