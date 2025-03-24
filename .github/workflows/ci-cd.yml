@@ -92,10 +92,6 @@ jobs:
         continue-on-error: true
       - name: Run Gitleaks
         uses: gitleaks/gitleaks-action@v2
-        with:
-          scan-dir: .
-          redact: true
-          verbose: true
 
       - name: Install Grype
         run: |
