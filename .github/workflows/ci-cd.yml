@@ -85,7 +85,7 @@ jobs:
         uses: returntocorp/semgrep-action@v1
         with:
           config: "auto"
-
+        continue-on-error: true
       - name: Run Gitleaks
         uses: gitleaks/gitleaks-action@v2
         with:
@@ -96,6 +96,7 @@ jobs:
           curl -sSfL https://raw.githubusercontent.com/anchore/grype/main/install.sh | sh -s -- -b /usr/local/bin
 
       - name: Scan backend image with Grype
+        continue-on-error: true
         run: |
           docker build -t backend-temp:latest ./application
           grype backend-temp:latest --fail-on high

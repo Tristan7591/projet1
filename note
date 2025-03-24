@@ -3,3 +3,9 @@ rajouter le passage de test a prod et changer la taille des instances papr la me
 METTRE  AJOUR LE README§§§§§§§§§§§§§§§
 verifier la coherence des variables avec terraform , il faut que github action et acces a toutes les variables qui sont dans tfvars en local S
 decommenter la partie rds pour le passage test/prod
+
+
+
+delete eks cluster:
+aws eks delete-cluster --name digital-store-cluster
+aws eks delete-nodegroup --cluster-name digital-store-cluster --nodegroup-name digital-store-node-group
