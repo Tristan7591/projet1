@@ -117,7 +117,7 @@ jobs:
         uses: aws-actions/amazon-ecr-login@v2
       - name: Push Backend Image
         env:
-          ECR_REGISTRY: 797394900921.dkr.ecr.us-east-1.amazonaws.com
+          ECR_REGISTRY: 797394900921.dkr.ecr.us-east-1.amazonaws.com/backend-repo
           ECR_REPOSITORY: backend-repo
           IMAGE_TAG: ${{ github.sha }}
         run: |
@@ -128,7 +128,7 @@ jobs:
           docker push $ECR_REGISTRY/$ECR_REPOSITORY:latest
       - name: Push Frontend Image
         env:
-          ECR_REGISTRY: 797394900921.dkr.ecr.us-east-1.amazonaws.com
+          ECR_REGISTRY: 797394900921.dkr.ecr.us-east-1.amazonaws.com/frontend-repo
           ECR_REPOSITORY: frontend-repo
           IMAGE_TAG: ${{ github.sha }}
         run: |
@@ -239,40 +239,69 @@ jobs:
           kubectl delete $POD
 
   terraform-cleanup:
-    if: ${{ failure() || github.event_name == 'workflow_dispatch' || always() }}
+    if: ${{ failure() }}
     needs: [terraform-deploy, eks-deploy, validate-infra]
     runs-on: ubuntu-latest
-    timeout-minutes: 20
     steps:
       - uses: actions/checkout@v3
-      - name: Wait 15 minutes unless override
-        if: ${{ github.event.inputs.immediate_cleanup != 'true' }}
+
+      - name: Short delay before cleanup
         run: |
-          echo "Waiting 15 minutes before cleanup unless skipped..."
-          sleep 900
+          echo "Delaying cleanup by 2 minutes..."
+          sleep 120
+
       - uses: aws-actions/configure-aws-credentials@v1
         with:
           aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
           aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
           aws-region: ${{ env.AWS_REGION }}
-      - name: Short delay before immediate cleanup
-        if: ${{ github.event.inputs.immediate_cleanup == 'true' }}
-        run: |
-          echo "Delaying immediate cleanup by 60 seconds..."
-          sleep 60
 
       - name: Cleanup AWS resources manually
         run: |
+          # Delete EKS resources
           aws eks delete-nodegroup --cluster-name digital-store-cluster --nodegroup-name digital-store-node-group || true
           aws eks delete-cluster --name digital-store-cluster || true
+
+          # Delete RDS
           aws rds delete-db-instance --db-instance-identifier digital-store-db --skip-final-snapshot || true
-          aws ecr delete-repository --repository-name backend-repo --force || true
-          aws ecr delete-repository --repository-name frontend-repo --force || true
-          # Optionnel: nettoyage des SG, rôles IAM, politiques, ALB
+
+          # Cleanup images in backend-repo and frontend-repo
+          for repo in backend-repo frontend-repo; do
+            IMAGE_TAGS=$(aws ecr list-images --repository-name $repo --query 'imageIds[*]' --output json)
+            if [ "$IMAGE_TAGS" != "[]" ]; then
+              aws ecr batch-delete-image --repository-name $repo --image-ids "$IMAGE_TAGS" || true
+            fi
+          done
+
+          # Delete all other ECR repositories
+          for repo in $(aws ecr describe-repositories --query 'repositories[*].repositoryName' --output text); do
+            if [[ "$repo" != "backend-repo" && "$repo" != "frontend-repo" ]]; then
+              aws ecr delete-repository --repository-name "$repo" --force || true
+            fi
+          done
+
+          # IAM detach and delete
+          aws iam detach-role-policy --role-name digital-store-eks-node-role --policy-arn arn:aws:iam::aws:policy/AmazonEKSWorkerNodePolicy || true
+          aws iam detach-role-policy --role-name digital-store-eks-node-role --policy-arn arn:aws:iam::aws:policy/AmazonEC2ContainerRegistryReadOnly || true
+          aws iam detach-role-policy --role-name digital-store-eks-node-role --policy-arn arn:aws:iam::aws:policy/AmazonEKS_CNI_Policy || true
+          aws iam delete-role --role-name digital-store-eks-node-role || true
+
+          aws iam detach-role-policy --role-name digital-store-eks-cluster-role --policy-arn arn:aws:iam::aws:policy/AmazonEKSServicePolicy || true
+          aws iam detach-role-policy --role-name digital-store-eks-cluster-role --policy-arn arn:aws:iam::aws:policy/AmazonEKSClusterPolicy || true
+          aws iam delete-role --role-name digital-store-eks-cluster-role || true
+
+          aws iam detach-role-policy --role-name ebs-csi-driver-role --policy-arn arn:aws:iam::aws:policy/service-role/AmazonEBSCSIDriverPolicy || true
+          aws iam delete-role --role-name ebs-csi-driver-role || true
+
+          aws iam detach-role-policy --role-name dlm-lifecycle-role --policy-arn arn:aws:iam::aws:policy/service-role/AWSDataLifecycleManagerServiceRole || true
+          aws iam delete-role-policy --role-name dlm-lifecycle-role --policy-name dlm-lifecycle-policy || true
+          aws iam delete-role --role-name dlm-lifecycle-role || true
+
       - name: Destroy Terraform-managed resources
         uses: hashicorp/setup-terraform@v1
         with:
           terraform_version: 1.5.0
+
       - run: |
           cd terraform
           terraform init

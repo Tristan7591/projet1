@@ -4,11 +4,9 @@ metadata:
   name: frontend-service
   namespace: default
 spec:
-  type: ClusterIP
   selector:
-    app: digital-store
-    tier: frontend
+    app: frontend
   ports:
     - port: 3000
       targetPort: 3000
-      name: http 
+  type: ClusterIP
