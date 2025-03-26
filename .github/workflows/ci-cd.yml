@@ -117,7 +117,7 @@ jobs:
         uses: aws-actions/amazon-ecr-login@v2
       - name: Push Backend Image
         env:
-          ECR_REGISTRY: 797394900921.dkr.ecr.us-east-1.amazonaws.com/backend-repo
+          ECR_REGISTRY: 797394900921.dkr.ecr.us-east-1.amazonaws.com
           ECR_REPOSITORY: backend-repo
           IMAGE_TAG: ${{ github.sha }}
         run: |
@@ -128,7 +128,7 @@ jobs:
           docker push $ECR_REGISTRY/$ECR_REPOSITORY:latest
       - name: Push Frontend Image
         env:
-          ECR_REGISTRY: 797394900921.dkr.ecr.us-east-1.amazonaws.com/frontend-repo
+          ECR_REGISTRY: 797394900921.dkr.ecr.us-east-1.amazonaws.com
           ECR_REPOSITORY: frontend-repo
           IMAGE_TAG: ${{ github.sha }}
         run: |
