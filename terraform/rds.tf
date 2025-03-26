@@ -12,7 +12,7 @@ resource "aws_db_instance" "postgres" {
   db_subnet_group_name    = aws_db_subnet_group.rds_subnet_group.name
   vpc_security_group_ids  = [aws_security_group.rds_sg.id]
   
-  multi_az            = true
+  multi_az            = false #a modifier en prod
   storage_encrypted   = true
   storage_type        = "gp3"
   
