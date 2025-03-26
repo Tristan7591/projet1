@@ -9,5 +9,5 @@ decommenter la partie rds pour le passage test/prod
 delete eks cluster:
 aws eks delete-nodegroup --cluster-name digital-store-cluster --nodegroup-name digital-store-node-group
 aws eks delete-cluster --name digital-store-cluster
-
+ 
 tester sans la partie cleanup du pipeline + verifier la creation de l'alb 
