@@ -459,3 +459,62 @@ Ce document liste toutes les étapes nécessaires pour configurer et déployer c
   - Points de restauration (RPO)
   - Temps de restauration (RTO)
   - Contacts d'urgence 
+
+# Todo List - Projet Digital Store
+
+## Infrastructure
+- [x] Configuration du cluster EKS
+- [x] Mise en place de RDS PostgreSQL
+- [x] Configuration de l'ALB
+- [x] Mise en place des security groups
+- [ ] Configuration de HTTPS avec ACM
+- [ ] Mise en place de WAF pour la sécurité
+
+## Application
+- [x] Configuration des déploiements Kubernetes
+- [x] Mise en place des services
+- [x] Configuration de l'Ingress
+- [ ] Optimisation des ressources (CPU/Mémoire)
+- [ ] Configuration des HPA (Horizontal Pod Autoscaling)
+
+## CI/CD
+- [x] Configuration du pipeline GitHub Actions
+- [x] Intégration avec ECR
+- [ ] Ajout des tests automatisés
+- [ ] Configuration des environnements (dev, staging, prod)
+- [ ] Mise en place des gates de qualité
+
+## Monitoring
+- [x] Configuration de CloudWatch
+- [ ] Mise en place de Prometheus/Grafana
+- [ ] Configuration des alertes
+- [ ] Mise en place des dashboards
+- [ ] Configuration des logs structurés
+
+## Sécurité
+- [x] Configuration des IAM roles
+- [x] Mise en place des security groups
+- [ ] Audit de sécurité
+- [ ] Mise en place de la rotation des secrets
+- [ ] Configuration de la conformité AWS
+
+## Documentation
+- [x] README.md
+- [x] Présentation du projet
+- [ ] Guide de déploiement
+- [ ] Documentation technique
+- [ ] Procédures de maintenance
+
+## Optimisation
+- [ ] Optimisation des coûts AWS
+- [ ] Optimisation des performances
+- [ ] Mise en place du caching
+- [ ] Optimisation des images Docker
+- [ ] Configuration de l'autoscaling
+
+## Prochaines étapes prioritaires
+1. Tester l'accès à l'application via l'ALB
+2. Vérifier les healthchecks
+3. Configurer le monitoring de base
+4. Mettre en place les alertes essentielles
+5. Documenter les procédures de maintenance 

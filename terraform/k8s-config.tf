@@ -59,4 +59,17 @@ resource "local_file" "k8s_postgres_storage" {
 resource "local_file" "k8s_configmap" {
   content = templatefile("${path.module}/templates/configmap.tpl", {})
   filename = "../k8s/configmap.yaml"
+}
+
+# Déploiement de l'application via Helm
+resource "helm_release" "digital_store" {
+  name       = "digital-store"
+  namespace  = "default"
+  chart      = "./chart" # Chemin vers votre chart Helm local
+  values     = [file("values.yaml")]
+
+  depends_on = [
+    helm_release.aws_load_balancer_controller,
+    aws_eks_node_group.main
+  ]
 } 

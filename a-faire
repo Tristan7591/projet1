@@ -1,0 +1,285 @@
+Puisque vous souhaitez que tout soit déployé via Terraform (et rien manuellement), le problème du conflit entre l’ALB statique créé par Terraform et l’ALB provisionné par l’Ingress Helm doit être résolu entièrement dans votre configuration Terraform. Voici comment résoudre ce problème de manière cohérente avec votre objectif d’automatisation complète :
+
+Problème à résoudre
+Conflit ALB : Terraform crée un ALB statique (aws_lb.main) avec des target groups et des règles, mais l’Ingress Helm utilise le contrôleur AWS ALB Ingress pour provisionner un autre ALB. Cela entraîne une redondance et une incohérence :
+L’ALB Terraform ne sera pas connecté aux pods Kubernetes (pas de cibles enregistrées → erreur 503 possible).
+L’ALB Helm est géré dynamiquement par le contrôleur ALB Ingress, mais l’ALB Terraform reste inutilisé.
+Objectif : Supprimer l’ALB statique Terraform et utiliser uniquement l’Ingress Helm avec le contrôleur ALB Ingress, tout en déployant ce dernier via Terraform.
+Solution étape par étape
+Supprimer les ressources ALB statiques dans Terraform
+Retirez les blocs Terraform suivants pour éviter le doublon :
+aws_lb.main
+aws_lb_listener.http
+aws_lb_target_group.backend
+aws_lb_target_group.frontend
+aws_lb_listener_rule.backend
+aws_lb_listener_rule.frontend
+aws_security_group.alb (si uniquement utilisé par l’ALB statique).
+Laissez l’Ingress Helm provisionner l’ALB via le contrôleur ALB Ingress.
+Déployer le contrôleur AWS ALB Ingress via Terraform
+Ajoutez une ressource helm_release dans Terraform pour installer le contrôleur ALB Ingress dans le cluster EKS. Cela remplace la commande manuelle helm install.
+Conserver l’Ingress Helm
+Gardez le template ingress.yaml dans votre chart Helm pour définir les règles de routage (/api → backend, / → frontend).
+Vérifier la cohérence
+Assurez-vous que les subnets publics sont disponibles pour l’ALB créé par l’Ingress.
+Mise en œuvre dans Terraform
+1. Supprimer les ressources ALB statiques
+Modifiez votre fichier Terraform pour supprimer les blocs suivants :
+
+hcl
+
+Réduire
+
+Envelopper
+
+Copier
+# Supprimez ces ressources
+resource "aws_lb" "main" { ... }
+resource "aws_lb_listener" "http" { ... }
+resource "aws_lb_target_group" "backend" { ... }
+resource "aws_lb_target_group" "frontend" { ... }
+resource "aws_lb_listener_rule" "backend" { ... }
+resource "aws_lb_listener_rule" "frontend" { ... }
+resource "aws_security_group" "alb" { ... }
+2. Ajouter le contrôleur ALB Ingress via Terraform
+Ajoutez cette ressource helm_release pour installer le contrôleur AWS ALB Ingress dans votre cluster EKS :
+
+hcl
+
+Réduire
+
+Envelopper
+
+Copier
+# Rôle IAM pour le contrôleur ALB Ingress
+resource "aws_iam_role" "alb_ingress_controller" {
+  name = "digital-store-alb-ingress-controller-role"
+
+  assume_role_policy = jsonencode({
+    Version = "2012-10-17"
+    Statement = [
+      {
+        Effect = "Allow"
+        Principal = {
+          Federated = "arn:aws:iam::${data.aws_caller_identity.current.account_id}:oidc-provider/${replace(aws_eks_cluster.main.identity[0].oidc[0].issuer, "https://", "")}"
+        }
+        Action = "sts:AssumeRoleWithWebIdentity"
+        Condition = {
+          StringEquals = {
+            "${replace(aws_eks_cluster.main.identity[0].oidc[0].issuer, "https://", "")}:sub" = "system:serviceaccount:kube-system:aws-load-balancer-controller"
+          }
+        }
+      }
+    ]
+  })
+
+  tags = {
+    Environment = var.environment
+    Project     = "digital-store"
+  }
+}
+
+resource "aws_iam_role_policy_attachment" "alb_ingress_controller_policy" {
+  policy_arn = "arn:aws:iam::aws:policy/AdministratorAccess" # Remplacez par une politique plus restrictive si possible
+  role       = aws_iam_role.alb_ingress_controller.name
+}
+
+# Installation du contrôleur ALB via Helm
+resource "helm_release" "aws_load_balancer_controller" {
+  name       = "aws-load-balancer-controller"
+  namespace  = "kube-system"
+  repository = "https://aws.github.io/eks-charts"
+  chart      = "aws-load-balancer-controller"
+  version    = "1.6.2" # Vérifiez la dernière version sur https://github.com/aws/eks-charts
+
+  set {
+    name  = "clusterName"
+    value = aws_eks_cluster.main.name
+  }
+
+  set {
+    name  = "serviceAccount.create"
+    value = "true"
+  }
+
+  set {
+    name  = "serviceAccount.name"
+    value = "aws-load-balancer-controller"
+  }
+
+  set {
+    name  = "serviceAccount.annotations.eks\\.amazonaws\\.com/role-arn"
+    value = aws_iam_role.alb_ingress_controller.arn
+  }
+
+  depends_on = [
+    aws_eks_cluster.main,
+    aws_eks_node_group.main,
+    aws_iam_role_policy_attachment.alb_ingress_controller_policy
+  ]
+}
+
+# Data pour récupérer l'ID du compte AWS
+data "aws_caller_identity" "current" {}
+Notes :
+
+Le rôle IAM utilise OIDC pour permettre au contrôleur ALB de gérer les ressources AWS.
+La politique AdministratorAccess est utilisée ici pour simplifier, mais vous devriez la remplacer par une politique plus restrictive (voir la documentation AWS pour les permissions nécessaires : https://docs.aws.amazon.com/eks/latest/userguide/aws-load-balancer-controller.html).
+Le depends_on garantit que le cluster et les nœuds sont prêts avant le déploiement.
+3. Conserver l’Ingress Helm
+Votre template ingress.yaml reste inchangé et sera appliqué via Helm :
+
+yaml
+
+Réduire
+
+Envelopper
+
+Copier
+apiVersion: networking.k8s.io/v1
+kind: Ingress
+metadata:
+  name: {{ .Release.Name }}-alb
+  namespace: {{ .Release.Namespace | default "default" }}
+  annotations:
+    kubernetes.io/ingress.class: alb
+    alb.ingress.kubernetes.io/scheme: internet-facing
+    alb.ingress.kubernetes.io/target-type: ip
+    alb.ingress.kubernetes.io/listen-ports: '[{"HTTP":80}]'
+    alb.ingress.kubernetes.io/healthcheck-path: /api/health
+    alb.ingress.kubernetes.io/healthcheck-port: "8080"
+    alb.ingress.kubernetes.io/healthcheck-protocol: HTTP
+spec:
+  ingressClassName: alb
+  rules:
+    - http:
+        paths:
+          - path: /api
+            pathType: Prefix
+            backend:
+              service:
+                name: {{ .Release.Name }}-backend-service
+                port:
+                  number: 8080
+          - path: /
+            pathType: Prefix
+            backend:
+              service:
+                name: {{ .Release.Name }}-frontend-service
+                port:
+                  number: 80
+4. Déployer le chart Helm via Terraform
+Ajoutez une ressource helm_release pour déployer votre application :
+
+hcl
+
+Réduire
+
+Envelopper
+
+Copier
+resource "helm_release" "digital_store" {
+  name       = "digital-store"
+  namespace  = "default"
+  chart      = "./chart" # Chemin vers votre chart Helm local
+  values     = [file("values.yaml")]
+
+  depends_on = [
+    helm_release.aws_load_balancer_controller,
+    aws_eks_node_group.main
+  ]
+}
+Assurez-vous que votre values.yaml est corrigé pour les images ECR (voir ci-dessous).
+
+Mise à jour de values.yaml
+Pour correspondre aux dépôts ECR Terraform (digital-store/backend et digital-store/frontend) :
+
+yaml
+
+Réduire
+
+Envelopper
+
+Copier
+appName: digital-store
+
+backend:
+  replicas: 2
+  image:
+    repository: "797394900921.dkr.ecr.us-east-1.amazonaws.com/digital-store/backend"
+    tag: "latest"
+  resources:
+    requests:
+      memory: "512Mi"
+      cpu: "200m"
+    limits:
+      memory: "1Gi"
+      cpu: "500m"
+
+frontend:
+  replicas: 2
+  image:
+    repository: "797394900921.dkr.ecr.us-east-1.amazonaws.com/digital-store/frontend"
+    tag: "latest"
+  resources:
+    requests:
+      memory: "128Mi"
+      cpu: "100m"
+    limits:
+      memory: "256Mi"
+      cpu: "200m"
+
+secrets:
+  postgres:
+    name: postgres-credentials
+configMap:
+  name: digital-store-config
+Validation
+Appliquez Terraform :
+bash
+
+Réduire
+
+Envelopper
+
+Copier
+terraform apply
+Cela provisionne :
+Le cluster EKS.
+Le contrôleur ALB Ingress.
+Votre application via Helm.
+Vérifiez l’ALB :
+bash
+
+Réduire
+
+Envelopper
+
+Copier
+kubectl get ingress digital-store-alb -n default
+Récupérez le hostname de l’ALB et testez :
+bash
+
+Réduire
+
+Envelopper
+
+Copier
+ALB_HOST=$(kubectl get ingress digital-store-alb -n default -o jsonpath='{.status.loadBalancer.ingress[0].hostname}')
+curl http://$ALB_HOST/
+curl http://$ALB_HOST/api/health
+Vérifiez les pods :
+bash
+
+Réduire
+
+Envelopper
+
+Copier
+kubectl get pods -n default
+Résultat attendu
+Erreur 503 résolue : L’ALB est maintenant géré par l’Ingress Helm, avec des cibles IP correctement enregistrées par le contrôleur ALB Ingress.
+Application disponible : Les chemins / et /api devraient répondre si les pods sont sains.
+Tout via Terraform : Plus besoin de commandes manuelles.
+Conclusion
+En supprimant l’ALB statique Terraform et en intégrant le contrôleur ALB Ingress ainsi que le déploiement Helm dans Terraform, vous éliminez le conflit et respectez votre objectif d’automatisation complète. Si vous rencontrez des problèmes (pods non démarrés, ALB non provisionné), partagez les logs ou sorties pour un débogage supplémentaire !

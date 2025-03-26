@@ -182,6 +182,117 @@ kubectl rollout restart deployment digital-store-backend
 kubectl rollout restart deployment digital-store-frontend
 ```
 
+## 7. Vérification de l'Infrastructure Digital Store
+
+### 1. Infrastructure AWS
+#### Cluster EKS
+- [ ] Cluster EKS créé et fonctionnel
+- [ ] Node groups configurés correctement
+- [ ] Security groups appliqués
+- [ ] RBAC configuré
+
+#### Base de données RDS
+- [ ] Instance PostgreSQL créée
+- [ ] Multi-AZ activé
+- [ ] Backups configurés
+- [ ] Security group appliqué
+
+#### ALB
+- [ ] Load Balancer créé
+- [ ] Target groups configurés
+- [ ] Health checks fonctionnels
+- [ ] Security group appliqué
+
+### 2. Kubernetes
+#### Namespaces
+- [ ] Namespace default créé
+- [ ] RBAC configuré
+
+#### Déploiements
+- [ ] Backend déployé
+- [ ] Frontend déployé
+- [ ] Réplicas configurés
+- [ ] Ressources définies
+
+#### Services
+- [ ] Service backend créé
+- [ ] Service frontend créé
+- [ ] Ports exposés correctement
+
+#### Ingress
+- [ ] Ingress controller installé
+- [ ] Ingress rules configurés
+- [ ] ALB annotations correctes
+
+### 3. Configuration
+#### Variables d'environnement
+- [ ] Variables backend configurées
+- [ ] Variables frontend configurées
+- [ ] Secrets gérés correctement
+
+#### Health Checks
+- [ ] Endpoint /api/health accessible
+- [ ] Health checks ALB fonctionnels
+- [ ] Timeouts configurés
+
+### 4. Accès et Sécurité
+#### IAM
+- [ ] Rôles EKS configurés
+- [ ] Service accounts créés
+- [ ] Politiques appliquées
+
+#### Réseau
+- [ ] VPC configuré
+- [ ] Sous-réseaux configurés
+- [ ] Security groups appliqués
+
+### 5. Monitoring
+#### Logs
+- [ ] CloudWatch configuré
+- [ ] Logs collectés
+- [ ] Rétention configurée
+
+#### Métriques
+- [ ] Métriques EKS collectées
+- [ ] Métriques RDS collectées
+- [ ] Métriques ALB collectées
+
+### 6. Tests d'Accès
+#### Frontend
+- [ ] Page d'accueil accessible
+- [ ] Assets chargés correctement
+- [ ] API calls fonctionnels
+
+#### Backend
+- [ ] API accessible
+- [ ] Endpoints fonctionnels
+- [ ] Base de données connectée
+
+### 7. Documentation
+- [ ] README.md à jour
+- [ ] Procédures documentées
+- [ ] Variables documentées
+
+## Commandes de Vérification
+```bash
+# Vérifier le cluster EKS
+kubectl get nodes
+kubectl get pods -n default
+
+# Vérifier les services
+kubectl get svc -n default
+
+# Vérifier l'ingress
+kubectl get ingress -n default
+
+# Vérifier les logs
+kubectl logs -f deployment/backend -n default
+kubectl logs -f deployment/frontend -n default
+
+# Vérifier les événements
+kubectl get events -n default
+```
+
 ## Conclusion
 
 Si toutes les vérifications ci-dessus réussissent, votre système Digital Store est correctement déployé et fonctionnel. En cas de problème, utilisez les commandes de dépannage pour identifier et résoudre les problèmes. 

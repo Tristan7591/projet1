@@ -118,7 +118,7 @@ jobs:
       - name: Push Backend Image
         env:
           ECR_REGISTRY: 797394900921.dkr.ecr.us-east-1.amazonaws.com
-          ECR_REPOSITORY: backend-repo
+          ECR_REPOSITORY: digital-store/backend
           IMAGE_TAG: ${{ github.sha }}
         run: |
           cd application
@@ -129,7 +129,7 @@ jobs:
       - name: Push Frontend Image
         env:
           ECR_REGISTRY: 797394900921.dkr.ecr.us-east-1.amazonaws.com
-          ECR_REPOSITORY: frontend-repo
+          ECR_REPOSITORY: digital-store/frontend
           IMAGE_TAG: ${{ github.sha }}
         run: |
           cd application/frontend
@@ -184,8 +184,8 @@ jobs:
           IMAGE_TAG: ${{ github.sha }}
           ECR_REGISTRY: 797394900921.dkr.ecr.us-east-1.amazonaws.com
         run: |
-          sed -i "s|image:.*digital-store/backend:.*|image: $ECR_REGISTRY/backend-repo:$IMAGE_TAG|g" k8s/backend/deployment.yaml
-          sed -i "s|image:.*digital-store/frontend:.*|image: $ECR_REGISTRY/frontend-repo:$IMAGE_TAG|g" k8s/frontend/deployment.yaml
+          sed -i "s|image:.*digital-store/backend:.*|image: $ECR_REGISTRY/digital-store/backend:$IMAGE_TAG|g" k8s/backend/deployment.yaml
+          sed -i "s|image:.*digital-store/frontend:.*|image: $ECR_REGISTRY/digital-store/frontend:$IMAGE_TAG|g" k8s/frontend/deployment.yaml
           kubectl apply -f k8s
 
   validate-infra:

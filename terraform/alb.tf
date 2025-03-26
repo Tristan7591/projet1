@@ -1,55 +1,70 @@
-resource "aws_lb" "main" {
-  name               = "digital-store-alb"
-  internal           = false
-  load_balancer_type = "application"
-  security_groups    = [aws_security_group.alb.id]
-  subnets            = local.public_subnet_ids
+# Rôle IAM pour le contrôleur ALB Ingress
+resource "aws_iam_role" "alb_ingress_controller" {
+  name = "digital-store-alb-ingress-controller-role"
 
-  enable_deletion_protection = false
+  assume_role_policy = jsonencode({
+    Version = "2012-10-17"
+    Statement = [
+      {
+        Effect = "Allow"
+        Principal = {
+          Federated = "arn:aws:iam::${data.aws_caller_identity.current.account_id}:oidc-provider/${replace(aws_eks_cluster.main.identity[0].oidc[0].issuer, "https://", "")}"
+        }
+        Action = "sts:AssumeRoleWithWebIdentity"
+        Condition = {
+          StringEquals = {
+            "${replace(aws_eks_cluster.main.identity[0].oidc[0].issuer, "https://", "")}:sub" = "system:serviceaccount:kube-system:aws-load-balancer-controller"
+          }
+        }
+      }
+    ]
+  })
 
   tags = {
     Environment = var.environment
-    Name        = "digital-store-alb"
+    Project     = "digital-store"
   }
 }
 
-resource "aws_lb_listener" "http" {
-  load_balancer_arn = aws_lb.main.arn
-  port              = "80"
-  protocol          = "HTTP"
-
-  default_action {
-    type = "fixed-response"
-    fixed_response {
-      content_type = "text/plain"
-      message_body = "No routes defined"
-      status_code  = "404"
-    }
-  }
+resource "aws_iam_role_policy_attachment" "alb_ingress_controller_policy" {
+  policy_arn = "arn:aws:iam::aws:policy/AdministratorAccess" # À remplacer par une politique plus restrictive en production
+  role       = aws_iam_role.alb_ingress_controller.name
 }
 
-resource "aws_security_group" "alb" {
-  name        = "digital-store-alb-sg"
-  description = "Allow HTTP inbound traffic"
-  vpc_id      = local.vpc_id
+# Installation du contrôleur ALB via Helm
+resource "helm_release" "aws_load_balancer_controller" {
+  name       = "aws-load-balancer-controller"
+  namespace  = "kube-system"
+  repository = "https://aws.github.io/eks-charts"
+  chart      = "aws-load-balancer-controller"
+  version    = "1.6.2"
 
-  ingress {
-    description = "HTTP from anywhere"
-    from_port   = 80
-    to_port     = 80
-    protocol    = "tcp"
-    cidr_blocks = ["0.0.0.0/0"]
+  set {
+    name  = "clusterName"
+    value = aws_eks_cluster.main.name
   }
 
-  egress {
-    from_port   = 0
-    to_port     = 0
-    protocol    = "-1"
-    cidr_blocks = ["0.0.0.0/0"]
+  set {
+    name  = "serviceAccount.create"
+    value = "true"
   }
 
-  tags = {
-    Name        = "digital-store-alb-sg"
-    Environment = var.environment
+  set {
+    name  = "serviceAccount.name"
+    value = "aws-load-balancer-controller"
   }
-} 
+
+  set {
+    name  = "serviceAccount.annotations.eks\\.amazonaws\\.com/role-arn"
+    value = aws_iam_role.alb_ingress_controller.arn
+  }
+
+  depends_on = [
+    aws_eks_cluster.main,
+    aws_eks_node_group.main,
+    aws_iam_role_policy_attachment.alb_ingress_controller_policy
+  ]
+}
+
+# Data pour récupérer l'ID du compte AWS
+data "aws_caller_identity" "current" {} 

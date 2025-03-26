@@ -1,0 +1,43 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: {{ .Values.appName }}-backend
+spec:
+  replicas: {{ .Values.backend.replicas }}
+  selector:
+    matchLabels:
+      app: {{ .Values.appName }}-backend
+  template:
+    metadata:
+      labels:
+        app: {{ .Values.appName }}-backend
+    spec:
+      containers:
+      - name: backend
+        image: {{ .Values.backend.image.repository }}:{{ .Values.backend.image.tag }}
+        ports:
+        - containerPort: 8080
+        resources:
+          {{- toYaml .Values.backend.resources | nindent 12 }}
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: {{ .Values.appName }}-frontend
+spec:
+  replicas: {{ .Values.frontend.replicas }}
+  selector:
+    matchLabels:
+      app: {{ .Values.appName }}-frontend
+  template:
+    metadata:
+      labels:
+        app: {{ .Values.appName }}-frontend
+    spec:
+      containers:
+      - name: frontend
+        image: {{ .Values.frontend.image.repository }}:{{ .Values.frontend.image.tag }}
+        ports:
+        - containerPort: 80
+        resources:
+          {{- toYaml .Values.frontend.resources | nindent 12 }} 
