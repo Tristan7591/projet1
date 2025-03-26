@@ -1,7 +1,6 @@
 # Digital Store - Architecture Cloud Native
 
 ## Vue d'Ensemble
-
 Digital Store est une application e-commerce cloud-native déployée sur AWS EKS en utilisant Terraform et Kubernetes. L'architecture suit les principes DevOps avec un pipeline CI/CD complet pour automatiser le déploiement et les tests.
 
 ## Table des Matières
