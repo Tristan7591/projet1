@@ -17,6 +17,7 @@ env:
   ECR_REPOSITORY_BACKEND: digital-store/backend
   ECR_REPOSITORY_FRONTEND: digital-store/frontend
   IMAGE_TAG: ${{ github.sha }}
+  EKS_CLUSTER_NAME: digital-store-cluster
 
 jobs:
   validate:
@@ -45,6 +46,10 @@ jobs:
         run: |
           cd application
           mvn test
+      - name: Verify Test Coverage
+        run: |
+          cd application
+          mvn verify
 
   app-security:
     needs: validate
@@ -69,14 +74,14 @@ jobs:
           path: "application/frontend"
           format: "HTML"
           args: "--failOnCVSS 7"
-      - name: Build Backend Docker Image
+      - name: Build and Test Docker Images
         run: |
           cd application
           docker build -t backend:latest .
-      - name: Build Frontend Docker Image
-        run: |
-          cd application/frontend
+          docker run --rm backend:latest mvn test
+          cd frontend
           docker build -t frontend:latest .
+          docker run --rm frontend:latest npm test
 
   security-checks:
     needs: [app-test, app-security]
@@ -134,7 +139,8 @@ jobs:
         run: |
           cd terraform
           terraform init
-          terraform apply -auto-approve
+          terraform plan -out=tfplan
+          terraform apply tfplan
 
       # Étape 2: Login à ECR et push des images
       - name: Login to Amazon ECR
@@ -148,6 +154,7 @@ jobs:
           docker build -t $ECR_REGISTRY/$ECR_REPOSITORY_BACKEND:$IMAGE_TAG -t $ECR_REGISTRY/$ECR_REPOSITORY_BACKEND:latest ./application
           docker push $ECR_REGISTRY/$ECR_REPOSITORY_BACKEND:$IMAGE_TAG
           docker push $ECR_REGISTRY/$ECR_REPOSITORY_BACKEND:latest
+          echo "ECR_REGISTRY=$ECR_REGISTRY" >> $GITHUB_ENV
 
       - name: Build and push frontend image
         env:
@@ -156,6 +163,11 @@ jobs:
           docker build -t $ECR_REGISTRY/$ECR_REPOSITORY_FRONTEND:$IMAGE_TAG -t $ECR_REGISTRY/$ECR_REPOSITORY_FRONTEND:latest ./application/frontend
           docker push $ECR_REGISTRY/$ECR_REPOSITORY_FRONTEND:$IMAGE_TAG
           docker push $ECR_REGISTRY/$ECR_REPOSITORY_FRONTEND:latest
+
+      - name: Verify ECR Images
+        run: |
+          aws ecr describe-images --repository-name $ECR_REPOSITORY_BACKEND --query 'imageDetails[*].imageTags[?contains(@, `$IMAGE_TAG`)]'
+          aws ecr describe-images --repository-name $ECR_REPOSITORY_FRONTEND --query 'imageDetails[*].imageTags[?contains(@, `$IMAGE_TAG`)]'
 
   eks-deploy:
     needs: terraform-deploy
@@ -168,8 +180,19 @@ jobs:
           aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
           aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
           aws-region: ${{ env.AWS_REGION }}
+
+      - name: Login to Amazon ECR
+        id: login-ecr
+        uses: aws-actions/amazon-ecr-login@v1
+
       - name: Update kubeconfig
-        run: aws eks update-kubeconfig --name digital-store-cluster --region ${{ env.AWS_REGION }}
+        run: aws eks update-kubeconfig --name ${{ env.EKS_CLUSTER_NAME }} --region ${{ env.AWS_REGION }}
+
+      - name: Verify EKS Cluster Access
+        run: |
+          kubectl get nodes
+          kubectl get namespaces
+
       - name: Deploy to EKS
         env:
           IMAGE_TAG: ${{ github.sha }}
@@ -178,6 +201,11 @@ jobs:
           sed -i "s|image:.*digital-store/backend:.*|image: $ECR_REGISTRY/digital-store/backend:$IMAGE_TAG|g" k8s/backend/deployment.yaml
           sed -i "s|image:.*digital-store/frontend:.*|image: $ECR_REGISTRY/digital-store/frontend:$IMAGE_TAG|g" k8s/frontend/deployment.yaml
           kubectl apply -f k8s
+
+      - name: Wait for Deployments
+        run: |
+          kubectl wait --for=condition=available deployment/backend --timeout=300s
+          kubectl wait --for=condition=available deployment/frontend --timeout=300s
 
   validate-infra:
     needs: eks-deploy
@@ -193,28 +221,44 @@ jobs:
           aws-region: ${{ env.AWS_REGION }}
 
       - name: Update kubeconfig
-        run: aws eks update-kubeconfig --name digital-store-cluster --region ${{ env.AWS_REGION }}
+        run: aws eks update-kubeconfig --name ${{ env.EKS_CLUSTER_NAME }} --region ${{ env.AWS_REGION }}
 
-      - name: Verify application health via ALB
+      # 1. Vérifier que les pods sont prêts
+      - name: Verify Pods Status
         run: |
-          ALB_HOST=$(kubectl get ingress digital-store-alb -n default -o jsonpath='{.status.loadBalancer.ingress[0].hostname}')
-          echo "ALB URL: http://$ALB_HOST"
-          sleep 120
-          curl --fail http://$ALB_HOST/api/health
+          echo "Waiting for pods to be ready..."
+          kubectl wait --for=condition=ready pod -l app=backend --timeout=300s
+          kubectl wait --for=condition=ready pod -l app=frontend --timeout=300s
+          echo "All pods are ready!"
 
+      # 2. Vérifier les logs des pods
+      - name: Verify Application Logs
+        run: |
+          echo "Checking backend logs..."
+          kubectl logs -l app=backend --tail=100
+          echo "Checking frontend logs..."
+          kubectl logs -l app=frontend --tail=100
+
+      # 3. Récupérer l'endpoint RDS
       - name: Get Terraform Output for RDS Endpoint
         id: rds-endpoint
         run: |
           cd terraform
           terraform init
           RDS_ENDPOINT=$(terraform output -raw endpoint)
+          if [ -z "$RDS_ENDPOINT" ]; then
+            echo "Error: RDS endpoint not found in Terraform outputs"
+            exit 1
+          fi
           echo "RDS_ENDPOINT=$RDS_ENDPOINT" >> $GITHUB_ENV
 
+      # 4. Récupérer le mot de passe DB
       - name: Get DB password from SSM
         id: get-db-password
         run: |
           echo "DB_PASSWORD=$(aws ssm get-parameter --name \"/terraform/db_password\" --with-decryption --query Parameter.Value --output text)" >> $GITHUB_ENV
 
+      # 5. Vérifier la connectivité RDS
       - name: Verify RDS connectivity from cluster
         env:
           DB_USER: ${{ secrets.DB_USERNAME }}
@@ -222,11 +266,36 @@ jobs:
           DB_NAME: ${{ secrets.DB_NAME }}
           RDS_ENDPOINT: ${{ env.RDS_ENDPOINT }}
         run: |
+          echo "Testing RDS connectivity..."
           POD=$(kubectl run tmp-psql --image=postgres:15 --restart=Never --command -- sleep 3600 -o name)
           kubectl exec $POD -- sh -c "apt-get update -qq && apt-get install -qq -y dnsutils netcat postgresql-client"
           kubectl exec $POD -- nslookup $RDS_ENDPOINT
           kubectl exec $POD -- nc -zv $RDS_ENDPOINT 5432
           kubectl exec $POD -- psql postgresql://$DB_USER:$DB_PASS@$RDS_ENDPOINT:5432/$DB_NAME -c '\\conninfo'
           kubectl delete $POD
+          echo "RDS connectivity verified successfully!"
+
+      # 6. Vérifier l'Ingress ALB
+      - name: Wait for Ingress ALB
+        run: |
+          echo "Waiting for Ingress ALB to be ready..."
+          kubectl wait --for=condition=ready ingress/digital-store-alb -n default --timeout=300s
+          echo "Ingress ALB is ready!"
+
+      # 7. Vérifier la santé de l'application via ALB
+      - name: Verify application health via ALB
+        run: |
+          echo "Getting ALB hostname..."
+          ALB_HOST=$(kubectl get ingress digital-store-alb -n default -o jsonpath='{.status.loadBalancer.ingress[0].hostname}')
+          if [ -z "$ALB_HOST" ]; then
+            echo "Error: ALB hostname not found"
+            exit 1
+          fi
+          echo "ALB URL: http://$ALB_HOST"
+          echo "Waiting for ALB to be fully provisioned..."
+          sleep 120
+          echo "Testing application health..."
+          curl --fail http://$ALB_HOST/api/health
+          echo "Application health check passed!"
 
 
