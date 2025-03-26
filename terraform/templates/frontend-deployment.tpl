@@ -1,35 +1,35 @@
 apiVersion: apps/v1
 kind: Deployment
 metadata:
-  name: digital-store-frontend
-  namespace: default
+  name: {{ .Release.Name }}-frontend
+  namespace: {{ .Release.Namespace | default "default" }}
   labels:
-    app: digital-store
+    app: {{ .Values.appName | default "digital-store" }}
     tier: frontend
 spec:
-  replicas: 2
+  replicas: {{ .Values.frontend.replicas | default 2 }}
   selector:
     matchLabels:
-      app: digital-store
+      app: {{ .Values.appName | default "digital-store" }}
       tier: frontend
   template:
     metadata:
       labels:
-        app: digital-store
+        app: {{ .Values.appName | default "digital-store" }}
         tier: frontend
     spec:
       containers:
         - name: react-container
-          image: "${ecr_repository_url}:${image_tag}"
+          image: "{{ .Values.frontend.image.repository }}:{{ .Values.frontend.image.tag | default "latest" }}"
           ports:
             - containerPort: 80
           resources:
             requests:
-              memory: "128Mi"
-              cpu: "100m"
+              memory: {{ .Values.frontend.resources.requests.memory | default "128Mi" }}
+              cpu: {{ .Values.frontend.resources.requests.cpu | default "100m" }}
             limits:
-              memory: "256Mi"
-              cpu: "200m"
+              memory: {{ .Values.frontend.resources.limits.memory | default "256Mi" }}
+              cpu: {{ .Values.frontend.resources.limits.cpu | default "200m" }}
           readinessProbe:
             httpGet:
               path: /
@@ -41,4 +41,4 @@ spec:
               path: /
               port: 80
             initialDelaySeconds: 20
-            periodSeconds: 10 
+            periodSeconds: 10
