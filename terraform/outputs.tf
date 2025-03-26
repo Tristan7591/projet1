@@ -48,11 +48,6 @@ output "alb_ingress_hostname" {
   value       = "digital-store-alb.${aws_eks_cluster.main.name}.${var.aws_region}.elb.amazonaws.com"
 }
 
-output "certificate_validation_instructions" {
-  description = "Instructions pour la validation du certificat SSL"
-  value       = "Pour valider le certificat SSL, ajoutez les enregistrements DNS suivants à votre domaine :\n${join("\n", [for record in aws_acm_certificate.digital_store.domain_validation_options : "Type: ${record.resource_record_type}\nNom: ${record.resource_record_name}\nValeur: ${record.resource_record_value}"])}"
-}
-
 output "eks_cluster_id" {
   description = "EKS cluster ID"
   value       = aws_eks_cluster.main.id
@@ -61,9 +56,4 @@ output "eks_cluster_id" {
 output "kubeconfig_command" {
   description = "Command to configure kubectl"
   value       = "aws eks update-kubeconfig --name ${aws_eks_cluster.main.name} --region ${var.aws_region}"
-}
-
-output "alb_dns_name" {
-  description = "The DNS name of the load balancer"
-  value       = aws_lb.main.dns_name
 }
