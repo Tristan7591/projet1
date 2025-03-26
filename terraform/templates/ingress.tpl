@@ -2,7 +2,7 @@ apiVersion: networking.k8s.io/v1
 kind: Ingress
 metadata:
   name: {{ .Release.Name }}-alb
-  namespace: {{ .Release.Namespace }}
+  namespace: {{ .Release.Namespace | default "default" }}
   annotations:
     kubernetes.io/ingress.class: alb
     alb.ingress.kubernetes.io/scheme: internet-facing
@@ -29,4 +29,4 @@ spec:
               service:
                 name: {{ .Release.Name }}-frontend-service
                 port:
-                  number: 3000
+                  number: 80  # Corrigé de 3000 à 80
