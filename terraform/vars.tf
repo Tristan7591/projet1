@@ -107,3 +107,19 @@ variable "tags" {
     ManagedBy   = "terraform"
   }
 }
+
+variable "backend_image" {
+  description = "ECR image URL for backend"
+  type        = string
+}
+
+variable "frontend_image" {
+  description = "ECR image URL for frontend"
+  type        = string
+}
+
+variable "kubeconfig_path" {
+  description = "Path to the kubeconfig file"
+  type        = string
+  default     = "~/.kube/config"
+}
