@@ -131,3 +131,11 @@ variable "kubeconfig_path" {
   type        = string
   default     = "~/.kube/config"
 }
+
+# Variables nécessaires (à ajouter dans variables.tf si absentes)
+variable "image_tag" {
+  description = "Tag for Docker images"
+  type        = string
+  default     = "latest"
+}
+
