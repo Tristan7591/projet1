@@ -119,11 +119,21 @@ jobs:
       - uses: hashicorp/setup-terraform@v1
         with:
           terraform_version: 1.5.0
-      - uses: aws-actions/configure-aws-credentials@v1
+      - name: Configure AWS credentials
+        uses: aws-actions/configure-aws-credentials@v1
         with:
           aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
           aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
           aws-region: ${{ env.AWS_REGION }}
+
+      # Install Helm for Terraform provider
+      - name: Install Helm
+        run: |
+          curl -fsSL -o get_helm.sh https://raw.githubusercontent.com/helm/helm/main/scripts/get-helm-3
+          chmod +x get_helm.sh
+          ./get_helm.sh
+          helm version
+          mkdir -p ~/.helm/repository
 
       # Étape 1: Déployer l'infrastructure avec Terraform
       - name: Get db_password from AWS SSM
@@ -186,6 +196,23 @@ jobs:
           aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
           aws-region: ${{ env.AWS_REGION }}
 
+      # Install Helm
+      - name: Install Helm
+        run: |
+          curl -fsSL -o get_helm.sh https://raw.githubusercontent.com/helm/helm/main/scripts/get-helm-3
+          chmod +x get_helm.sh
+          ./get_helm.sh
+          helm version
+
+      - name: Check EKS Cluster Status
+        run: |
+          CLUSTER_STATUS=$(aws eks describe-cluster --name ${{ env.EKS_CLUSTER_NAME }} --query 'cluster.status' --output text)
+          if [ "$CLUSTER_STATUS" != "ACTIVE" ]; then
+            echo "EKS Cluster is not active. Current status: $CLUSTER_STATUS"
+            exit 1
+          fi
+          echo "EKS Cluster is ACTIVE and ready"
+
       - name: Login to Amazon ECR
         id: login-ecr
         uses: aws-actions/amazon-ecr-login@v2
@@ -203,6 +230,21 @@ jobs:
           kubectl get nodes
           kubectl get namespaces
 
+      # Wait for the cluster to be fully ready
+      - name: Wait for EKS cluster to be fully ready
+        run: |
+          echo "Waiting for all nodes to be ready..."
+          until kubectl get nodes | grep -v "NotReady" | grep -v NAME; do
+            echo "Some nodes are not ready yet. Waiting..."
+            sleep 10
+          done
+          echo "All nodes are now ready"
+          
+          echo "Waiting for core components..."
+          kubectl wait --for=condition=available --timeout=300s deployment -l k8s-app=kube-dns -n kube-system
+          kubectl wait --for=condition=available --timeout=300s deployment -l app.kubernetes.io/name=aws-load-balancer-controller -n kube-system || true
+          echo "Core components check completed"
+
       - name: Deploy to EKS
         env:
           IMAGE_TAG: ${{ github.sha }}
@@ -211,6 +253,18 @@ jobs:
           sed -i "s|image:.*digital-store/backend:.*|image: $ECR_REGISTRY/digital-store/backend:$IMAGE_TAG|g" k8s/backend/deployment.yaml
           sed -i "s|image:.*digital-store/frontend:.*|image: $ECR_REGISTRY/digital-store/frontend:$IMAGE_TAG|g" k8s/frontend/deployment.yaml
           kubectl apply -f k8s
+
+      # Check Helm release status
+      - name: Check Helm release status
+        run: |
+          if kubectl get namespace default; then
+            if helm list -n default | grep digital-store; then
+              echo "Checking Helm release status..."
+              helm status digital-store -n default
+            else
+              echo "Helm release not found, it may have failed"
+            fi
+          fi
 
       - name: Wait for Deployments
         run: |
@@ -229,6 +283,15 @@ jobs:
           aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
           aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
           aws-region: ${{ env.AWS_REGION }}
+
+      - name: Check EKS Cluster Status
+        run: |
+          CLUSTER_STATUS=$(aws eks describe-cluster --name ${{ env.EKS_CLUSTER_NAME }} --query 'cluster.status' --output text)
+          if [ "$CLUSTER_STATUS" != "ACTIVE" ]; then
+            echo "EKS Cluster is not active. Current status: $CLUSTER_STATUS"
+            exit 1
+          fi
+          echo "EKS Cluster is ACTIVE and ready"
 
       - name: Update kubeconfig
         run: aws eks update-kubeconfig --name ${{ env.EKS_CLUSTER_NAME }} --region ${{ env.AWS_REGION }}

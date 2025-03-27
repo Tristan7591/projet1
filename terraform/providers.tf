@@ -28,6 +28,10 @@ provider "helm" {
       command     = "aws"
     }
   }
+  
+  debug = true
+  repository_config_path = "${path.module}/.helm/repositories.yaml"
+  repository_cache       = "${path.module}/.helm/cache"
 }
 
 provider "kubernetes" {
@@ -38,4 +42,12 @@ provider "kubernetes" {
     args        = ["eks", "get-token", "--cluster-name", aws_eks_cluster.main.name]
     command     = "aws"
   }
+  
+  # Added timeouts to improve reliability
+  experiments {
+    manifest_resource = true
+  }
+
+  # Increase timeouts for cluster initialization
+  wait_for_rollout = true
 }

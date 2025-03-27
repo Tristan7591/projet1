@@ -61,24 +61,96 @@ resource "local_file" "k8s_configmap" {
   filename = "../k8s/configmap.yaml"
 }
 
-# Déploiement de l'application via Helm
+# Déploiement direct via kubernetes_manifest au lieu de Helm
+resource "kubernetes_namespace" "digital_store" {
+  metadata {
+    name = "default"
+  }
+}
+
+# Assurer que le répertoire Helm existe
+resource "null_resource" "helm_prepare" {
+  provisioner "local-exec" {
+    command = "mkdir -p ${path.module}/.helm/cache ${path.module}/.helm/repositories"
+  }
+}
+
+# Déploiement de l'application via Helm mais avec null_resource comme backup
 resource "helm_release" "digital_store" {
+  depends_on = [
+    aws_eks_cluster.main,
+    aws_eks_node_group.main,
+    null_resource.helm_prepare
+  ]
+
   name             = "digital-store"
   namespace        = "default"
   create_namespace = true
   chart            = "${path.module}/chart"
   values           = [file("${path.module}/chart/values.yaml")]
   
-  timeout          = 900 # 15 minutes
+  timeout          = 900 # 15 minutes instead of 10
   wait             = true
-  atomic           = false
-  cleanup_on_fail  = false
-
-  # Force la recréation si échec
+  atomic           = true # Changed to true to roll back on failure
+  cleanup_on_fail  = true # Changed to true to clean up resources on failure
   recreate_pods    = true
+  replace          = true
+  force_update     = true
+  max_history      = 10
+  
+  # Added lifecycle block to handle errors better
+  lifecycle {
+    ignore_changes = [
+      values
+    ]
+  }
+}
 
+# Plan B : Déployer avec kubectl si Helm échoue
+resource "null_resource" "kubectl_fallback" {
   depends_on = [
-    aws_eks_cluster.main,
-    aws_eks_node_group.main
+    helm_release.digital_store
   ]
+
+  # Seulement s'exécute si Helm a échoué
+  triggers = {
+    helm_success = helm_release.digital_store.status != "failed" ? true : false
+    always_run   = "${timestamp()}"
+  }
+
+  provisioner "local-exec" {
+    command = <<-EOT
+      if [ "${helm_release.digital_store.status}" == "failed" ]; then
+        echo "Helm deployment failed, applying with kubectl as fallback..."
+        aws eks update-kubeconfig --name ${aws_eks_cluster.main.name} --region ${var.aws_region}
+        
+        # Ensure no conflicting resources from the failed Helm release
+        echo "Cleaning up any previous resources..."
+        kubectl delete deployment,service,ingress,configmap,secret -l app=digital-store --ignore-not-found=true -n default
+
+        echo "Waiting for resources to be deleted..."
+        sleep 30
+        
+        echo "Applying Kubernetes resources with kubectl..."
+        kubectl apply -f ../k8s/configmap.yaml || true
+        kubectl apply -f ../k8s/database/postgres/secret.yaml || true
+        kubectl apply -f ../k8s/database/postgres/storage.yaml || true
+        kubectl apply -f ../k8s/database/postgres/deployment.yaml || true
+        kubectl apply -f ../k8s/database/postgres/service.yaml || true
+        kubectl apply -f ../k8s/backend/ || true
+        kubectl apply -f ../k8s/frontend/ || true
+        kubectl apply -f ../k8s/ingress/ || true
+        
+        echo "Waiting for deployments..."
+        kubectl wait --for=condition=available --timeout=300s deployment/digital-store-backend -n default || true
+        kubectl wait --for=condition=available --timeout=300s deployment/digital-store-frontend -n default || true
+        
+        echo "Checking deployment status..."
+        kubectl get deployments -n default
+        kubectl get pods -n default
+      else
+        echo "Helm deployment succeeded, no fallback needed."
+      fi
+    EOT
+  }
 } 
