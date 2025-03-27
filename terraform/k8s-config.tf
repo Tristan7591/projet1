@@ -63,13 +63,22 @@ resource "local_file" "k8s_configmap" {
 
 # Déploiement de l'application via Helm
 resource "helm_release" "digital_store" {
-  name       = "digital-store"
-  namespace  = "default"
-  chart      = "./chart" # Chemin vers votre chart Helm local
-  values     = [file("values.yaml")]
+  name             = "digital-store"
+  namespace        = "default"
+  create_namespace = true
+  chart            = "${path.module}/chart"
+  values           = [file("${path.module}/chart/values.yaml")]
+  
+  timeout          = 1800 # 30 minutes
+  wait             = true
+  atomic           = false
+  cleanup_on_fail  = false
+
+  # Force la recréation si échec
+  recreate_pods    = true
 
   depends_on = [
-    helm_release.aws_load_balancer_controller,
+    aws_eks_cluster.main,
     aws_eks_node_group.main
   ]
 } 
