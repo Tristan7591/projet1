@@ -187,6 +187,7 @@ jobs:
           docker push $ECR_REGISTRY/$ECR_REPOSITORY_FRONTEND:latest
           echo "FRONTEND_IMAGE=$ECR_REGISTRY/$ECR_REPOSITORY_FRONTEND:$IMAGE_TAG" >> $GITHUB_ENV
 
+ 
   deploy-app:
     needs: build-images
     runs-on: ubuntu-latest
@@ -207,27 +208,32 @@ jobs:
           chmod +x get_helm.sh
           ./get_helm.sh
           helm version
+      - name: Update kubeconfig
+        run: |
+          aws eks update-kubeconfig --name digital-store-cluster --region us-east-1
       - name: Get ECR Registry
         run: |
           ECR_REGISTRY=$(aws ecr get-authorization-token --output text --query 'authorizationData[].proxyEndpoint' | sed 's|https://||')
           echo "ECR_REGISTRY=$ECR_REGISTRY" >> $GITHUB_ENV
-      - name: Terraform Init
-        run: |
-          cd terraform
-          terraform init
-      - name: Terraform Apply (deploy app)
+      - name: Deploy Helm Chart
         env:
           IMAGE_TAG: ${{ github.sha }}
           ECR_REGISTRY: ${{ env.ECR_REGISTRY }}
         run: |
           cd terraform
-          terraform apply -var deploy_app=true \
-            -var backend_image="$ECR_REGISTRY/$ECR_REPOSITORY_BACKEND:$IMAGE_TAG" \
-            -var frontend_image="$ECR_REGISTRY/$ECR_REPOSITORY_FRONTEND:$IMAGE_TAG" \
-            -auto-approve
+          helm upgrade --install digital-store ./chart \
+            --namespace default \
+            --values ./chart/values.yaml \
+            --timeout 900s \
+            --atomic \
+            --cleanup-on-fail \
+            --wait \
+            --set backend.image.repository="$ECR_REGISTRY/$ECR_REPOSITORY_BACKEND" \
+            --set backend.image.tag="$IMAGE_TAG" \
+            --set frontend.image.repository="$ECR_REGISTRY/$ECR_REPOSITORY_FRONTEND" \
+            --set frontend.image.tag="$IMAGE_TAG"
       - name: Check Helm deployment status
         run: |
-          aws eks update-kubeconfig --name digital-store-cluster --region us-east-1
           helm list -n default
           kubectl get pods -n default
 
