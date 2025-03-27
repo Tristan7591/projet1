@@ -75,7 +75,6 @@ resource "null_resource" "helm_prepare" {
   }
 }
 
-# Déploiement de l'application via Helm mais avec null_resource comme backup
 resource "helm_release" "digital_store" {
   depends_on = [
     aws_eks_cluster.main,
@@ -85,25 +84,67 @@ resource "helm_release" "digital_store" {
 
   name             = "digital-store"
   namespace        = "default"
-  create_namespace = true
+  create_namespace = false # "default" existe déjà, pas besoin de le créer
   chart            = "${path.module}/chart"
   values           = [file("${path.module}/chart/values.yaml")]
-  
-  timeout          = 900 # 15 minutes instead of 10
-  wait             = true
-  atomic           = true # Changed to true to roll back on failure
-  cleanup_on_fail  = true # Changed to true to clean up resources on failure
-  recreate_pods    = true
-  replace          = true
-  force_update     = true
-  max_history      = 10
-  
-  # Added lifecycle block to handle errors better
+
+  timeout          = 900  # 15 minutes pour les déploiements complexes
+  wait             = true  # Attend que toutes les ressources soient prêtes
+  atomic           = true  # Rollback en cas d'échec
+  cleanup_on_fail  = true  # Nettoie les ressources échouées
+  max_history      = 10    # Limite l'historique des révisions
+
+  # Options supprimées car redondantes ou risquées avec atomic :
+  # recreate_pods = true  # Inutile avec atomic
+  # replace       = true  # Dangereux sauf cas spécifique
+  # force_update  = true  # Géré par atomic
+
   lifecycle {
     ignore_changes = [
-      values
+      values  # Ignore les modifications manuelles dans values.yaml
     ]
   }
+
+  # Ajout des variables d'image pour cohérence avec CI/CD
+  set {
+    name  = "backend.image"
+    value = var.backend_image  # Doit être défini dans variables.tf
+  }
+  set {
+    name  = "frontend.image"
+    value = var.frontend_image  # Doit être défini dans variables.tf
+  }
+}
+
+# Backup avec null_resource pour exécuter Helm manuellement si nécessaire
+resource "null_resource" "helm_prepare" {
+  provisioner "local-exec" {
+    command = <<EOT
+      helm upgrade --install digital-store ${path.module}/chart \
+        --namespace default \
+        --values ${path.module}/chart/values.yaml \
+        --timeout 900s \
+        --atomic \
+        --cleanup-on-fail \
+        --wait \
+        --set backend.image=${var.backend_image} \
+        --set frontend.image=${var.frontend_image}
+    EOT
+    environment = {
+      KUBECONFIG = var.kubeconfig_path  # Assurez-vous que cette variable est définie
+    }
+  }
+
+  # Déclencheur pour relancer uniquement si nécessaire (optionnel)
+  triggers = {
+    helm_release_id = helm_release.digital_store.id
+    always_run     askan = false  # Ne se déclenche que si explicitement demandé
+  }
+
+  depends_on = [
+    aws_eks_cluster.main,
+    aws_eks_node_group.main
+  ]
 }
 
 # Plan B : Déployer avec kubectl si Helm échoue
