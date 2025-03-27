@@ -75,7 +75,10 @@ resource "null_resource" "helm_prepare" {
   }
 }
 
+# Déploiement de l'application via Helm mais avec null_resource comme backup
 resource "helm_release" "digital_store" {
+  count = var.deploy_app ? 1 : 0
+  
   depends_on = [
     aws_eks_cluster.main,
     aws_eks_node_group.main,
@@ -84,35 +87,34 @@ resource "helm_release" "digital_store" {
 
   name             = "digital-store"
   namespace        = "default"
-  create_namespace = false # "default" existe déjà, pas besoin de le créer
+  create_namespace = true
   chart            = "${path.module}/chart"
   values           = [file("${path.module}/chart/values.yaml")]
-
-  timeout          = 900  # 15 minutes pour les déploiements complexes
-  wait             = true  # Attend que toutes les ressources soient prêtes
-  atomic           = true  # Rollback en cas d'échec
-  cleanup_on_fail  = true  # Nettoie les ressources échouées
-  max_history      = 10    # Limite l'historique des révisions
-
-  # Options supprimées car redondantes ou risquées avec atomic :
-  # recreate_pods = true  # Inutile avec atomic
-  # replace       = true  # Dangereux sauf cas spécifique
-  # force_update  = true  # Géré par atomic
-
+  
+  timeout          = 900 # 15 minutes instead of 10
+  wait             = true
+  atomic           = true
+  cleanup_on_fail  = true
+  recreate_pods    = true
+  replace          = true
+  force_update     = true
+  max_history      = 10
+  
+  # Added lifecycle block to handle errors better
   lifecycle {
     ignore_changes = [
-      values  # Ignore les modifications manuelles dans values.yaml
+      values
     ]
   }
-
-  # Ajout des variables d'image pour cohérence avec CI/CD
+  
   set {
-    name  = "backend.image"
-    value = var.backend_image  # Doit être défini dans variables.tf
+    name  = "backend.image.repository"
+    value = var.backend_image
   }
+  
   set {
-    name  = "frontend.image"
-    value = var.frontend_image  # Doit être défini dans variables.tf
+    name  = "frontend.image.repository"
+    value = var.frontend_image
   }
 }
 
@@ -138,7 +140,7 @@ resource "null_resource" "helm_prepare" {
   # Déclencheur pour relancer uniquement si nécessaire (optionnel)
   triggers = {
     helm_release_id = helm_release.digital_store.id
-    always_run     askan = false  # Ne se déclenche que si explicitement demandé
+    always_run     = false  # Ne se déclenche que si explicitement demandé
   }
 
   depends_on = [
@@ -153,44 +155,62 @@ resource "null_resource" "kubectl_fallback" {
     helm_release.digital_store
   ]
 
-  # Seulement s'exécute si Helm a échoué
+  # Simplifions le trigger au maximum pour éviter les erreurs de syntaxe
   triggers = {
-    helm_success = helm_release.digital_store.status != "failed" ? true : false
-    always_run   = "${timestamp()}"
+    always_run = timestamp()
   }
 
   provisioner "local-exec" {
     command = <<-EOT
-      if [ "${helm_release.digital_store.status}" == "failed" ]; then
-        echo "Helm deployment failed, applying with kubectl as fallback..."
-        aws eks update-kubeconfig --name ${aws_eks_cluster.main.name} --region ${var.aws_region}
+      # Version simplifiée du script qui ne fait pas référence au statut du helm_release
+      echo "Vérification du déploiement Helm..."
+      
+      # Vérifier si nous avons accès au cluster
+      if ! aws eks describe-cluster --name ${aws_eks_cluster.main.name} --region ${var.aws_region} > /dev/null 2>&1; then
+        echo "Impossible d'accéder au cluster EKS. Abandon."
+        exit 0
+      fi
+      
+      # Configurer kubectl
+      aws eks update-kubeconfig --name ${aws_eks_cluster.main.name} --region ${var.aws_region}
+      
+      # Vérifier si le déploiement Helm existe et son statut
+      if helm status digital-store -n default > /dev/null 2>&1; then
+        HELM_STATUS=$(helm status digital-store -n default -o json | grep -q '"status":"deployed"' && echo "success" || echo "failed")
         
-        # Ensure no conflicting resources from the failed Helm release
-        echo "Cleaning up any previous resources..."
-        kubectl delete deployment,service,ingress,configmap,secret -l app=digital-store --ignore-not-found=true -n default
-
-        echo "Waiting for resources to be deleted..."
-        sleep 30
-        
-        echo "Applying Kubernetes resources with kubectl..."
-        kubectl apply -f ../k8s/configmap.yaml || true
-        kubectl apply -f ../k8s/database/postgres/secret.yaml || true
-        kubectl apply -f ../k8s/database/postgres/storage.yaml || true
-        kubectl apply -f ../k8s/database/postgres/deployment.yaml || true
-        kubectl apply -f ../k8s/database/postgres/service.yaml || true
-        kubectl apply -f ../k8s/backend/ || true
-        kubectl apply -f ../k8s/frontend/ || true
-        kubectl apply -f ../k8s/ingress/ || true
-        
-        echo "Waiting for deployments..."
-        kubectl wait --for=condition=available --timeout=300s deployment/digital-store-backend -n default || true
-        kubectl wait --for=condition=available --timeout=300s deployment/digital-store-frontend -n default || true
-        
-        echo "Checking deployment status..."
-        kubectl get deployments -n default
-        kubectl get pods -n default
+        if [ "$HELM_STATUS" == "failed" ]; then
+          echo "Déploiement Helm en échec, application du plan B avec kubectl..."
+          
+          # Nettoyer les ressources existantes
+          echo "Nettoyage des ressources existantes..."
+          kubectl delete deployment,service,ingress,configmap -l app=digital-store --ignore-not-found=true -n default
+          
+          echo "Attente de la suppression des ressources..."
+          sleep 30
+          
+          # Appliquer les nouveaux manifests
+          echo "Application des ressources Kubernetes avec kubectl..."
+          kubectl apply -f ../k8s/configmap.yaml || true
+          kubectl apply -f ../k8s/backend/ || true
+          kubectl apply -f ../k8s/frontend/ || true
+          kubectl apply -f ../k8s/ingress/ || true
+          
+          echo "Attente des déploiements..."
+          kubectl wait --for=condition=available --timeout=300s deployment/digital-store-backend -n default || true
+          kubectl wait --for=condition=available --timeout=300s deployment/digital-store-frontend -n default || true
+        else
+          echo "Déploiement Helm réussi. Aucune action requise."
+        fi
       else
-        echo "Helm deployment succeeded, no fallback needed."
+        if [ "${var.deploy_app}" == "true" ]; then
+          echo "Déploiement Helm non trouvé. Application des manifests Kubernetes directement..."
+          kubectl apply -f ../k8s/configmap.yaml || true
+          kubectl apply -f ../k8s/backend/ || true
+          kubectl apply -f ../k8s/frontend/ || true
+          kubectl apply -f ../k8s/ingress/ || true
+        else
+          echo "Déploiement de l'application non demandé (deploy_app=false)."
+        fi
       fi
     EOT
   }

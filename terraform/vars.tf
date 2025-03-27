@@ -108,14 +108,22 @@ variable "tags" {
   }
 }
 
+variable "deploy_app" {
+  description = "Whether to deploy the application with Helm"
+  type        = bool
+  default     = false
+}
+
 variable "backend_image" {
-  description = "ECR image URL for backend"
+  description = "Backend image URL for deployment"
   type        = string
+  default     = ""
 }
 
 variable "frontend_image" {
-  description = "ECR image URL for frontend"
+  description = "Frontend image URL for deployment"
   type        = string
+  default     = ""
 }
 
 variable "kubeconfig_path" {

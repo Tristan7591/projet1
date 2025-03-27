@@ -43,11 +43,10 @@ provider "kubernetes" {
     command     = "aws"
   }
   
-  # Added timeouts to improve reliability
-  experiments {
-    manifest_resource = true
+  # Simple augmentation du timeout
+  timeouts {
+    create = "30m"
+    update = "30m"
+    delete = "30m"
   }
-
-  # Increase timeouts for cluster initialization
-  wait_for_rollout = true
 }
