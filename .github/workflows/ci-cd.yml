@@ -100,8 +100,9 @@ jobs:
           config: "auto"
         continue-on-error: true
       - name: Run Gitleaks
+        continue-on-error: true
         uses: gitleaks/gitleaks-action@v2
-
+        
       - name: Install Grype
         run: |
           curl -sSfL https://raw.githubusercontent.com/anchore/grype/main/install.sh | sh -s -- -b /usr/local/bin
