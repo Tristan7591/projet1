@@ -157,4 +157,9 @@ yarn-error.log*
 coverage/
 dist/
 .cache/
-node_modules/ 
+node_modules/
+
+# Documentation temporaire
+a-faire
+todo.md
+verification.md 
