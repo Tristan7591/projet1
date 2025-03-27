@@ -69,7 +69,7 @@ resource "helm_release" "digital_store" {
   chart            = "${path.module}/chart"
   values           = [file("${path.module}/chart/values.yaml")]
   
-  timeout          = 1800 # 30 minutes
+  timeout          = 900 # 15 minutes
   wait             = true
   atomic           = false
   cleanup_on_fail  = false
