@@ -111,6 +111,7 @@ jobs:
           docker build -t backend-temp:latest ./application
           grype backend-temp:latest --fail-on high
 
+  
   terraform-deploy:
     needs: security-checks
     runs-on: ubuntu-latest
@@ -148,13 +149,6 @@ jobs:
       - name: Wait for EKS cluster
         run: |
           aws eks wait cluster-active --region us-east-1 --name digital-store-cluster || true
-      - name: Update kubeconfig
-        run: |
-          aws eks update-kubeconfig --name digital-store-cluster --region us-east-1
-      - name: Helm Repo Update
-        run: |
-          helm repo add aws-ebs-csi-driver https://kubernetes-sigs.github.io/aws-ebs-csi-driver
-          helm repo update
 
   build-images:
     needs: terraform-deploy
