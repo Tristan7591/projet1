@@ -146,7 +146,15 @@ jobs:
           cd terraform
           terraform apply -var deploy_app=false -auto-approve
       - name: Wait for EKS cluster
-        run: aws eks wait cluster-active --region us-east-1 --name digital-store-cluster || true
+        run: |
+          aws eks wait cluster-active --region us-east-1 --name digital-store-cluster || true
+      - name: Update kubeconfig
+        run: |
+          aws eks update-kubeconfig --name digital-store-cluster --region us-east-1
+      - name: Helm Repo Update
+        run: |
+          helm repo add aws-ebs-csi-driver https://kubernetes-sigs.github.io/aws-ebs-csi-driver
+          helm repo update
 
   build-images:
     needs: terraform-deploy
