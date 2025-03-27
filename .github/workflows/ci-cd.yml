@@ -125,7 +125,6 @@ jobs:
           aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
           aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
           aws-region: us-east-1
-
       - name: Install Helm
         run: |
           curl -fsSL -o get_helm.sh https://raw.githubusercontent.com/helm/helm/main/scripts/get-helm-3
@@ -133,25 +132,21 @@ jobs:
           ./get_helm.sh
           helm version
           mkdir -p ~/.helm/repository
-
       - name: Get db_password from AWS SSM
         id: get-db-password
         run: |
           DB_PASSWORD=$(aws ssm get-parameter --name "/terraform/db_password" --with-decryption --query "Parameter.Value" --output text)
           echo "TF_VAR_db_password=$DB_PASSWORD" >> $GITHUB_ENV
-
-      - name: Wait for EKS cluster
-        run: aws eks wait cluster-active --region us-east-1 --name digital-store-cluster || true
-
       - name: Terraform Init
         run: |
           cd terraform
           terraform init
-
       - name: Terraform Apply (infrastructure only)
         run: |
           cd terraform
           terraform apply -var deploy_app=false -auto-approve
+      - name: Wait for EKS cluster
+        run: aws eks wait cluster-active --region us-east-1 --name digital-store-cluster || true
 
   build-images:
     needs: terraform-deploy
@@ -164,16 +159,13 @@ jobs:
           aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
           aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
           aws-region: us-east-1
-  
       - name: Login to Amazon ECR
         id: login-ecr
         uses: aws-actions/amazon-ecr-login@v2
-  
       - name: Get ECR Registry
         run: |
           ECR_REGISTRY=$(aws ecr get-authorization-token --output text --query 'authorizationData[].proxyEndpoint' | sed 's|https://||')
           echo "ECR_REGISTRY=$ECR_REGISTRY" >> $GITHUB_ENV
-  
       - name: Build and push backend image
         env:
           ECR_REGISTRY: ${{ env.ECR_REGISTRY }}
@@ -183,7 +175,6 @@ jobs:
           docker push $ECR_REGISTRY/$ECR_REPOSITORY_BACKEND:$IMAGE_TAG
           docker push $ECR_REGISTRY/$ECR_REPOSITORY_BACKEND:latest
           echo "BACKEND_IMAGE=$ECR_REGISTRY/$ECR_REPOSITORY_BACKEND:$IMAGE_TAG" >> $GITHUB_ENV
-  
       - name: Build and push frontend image
         env:
           ECR_REGISTRY: ${{ env.ECR_REGISTRY }}
@@ -208,24 +199,20 @@ jobs:
           aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
           aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
           aws-region: us-east-1
-  
       - name: Install Helm
         run: |
           curl -fsSL -o get_helm.sh https://raw.githubusercontent.com/helm/helm/main/scripts/get-helm-3
           chmod +x get_helm.sh
           ./get_helm.sh
           helm version
-  
       - name: Get ECR Registry
         run: |
           ECR_REGISTRY=$(aws ecr get-authorization-token --output text --query 'authorizationData[].proxyEndpoint' | sed 's|https://||')
           echo "ECR_REGISTRY=$ECR_REGISTRY" >> $GITHUB_ENV
-  
       - name: Terraform Init
         run: |
           cd terraform
           terraform init
-  
       - name: Terraform Apply (deploy app)
         env:
           IMAGE_TAG: ${{ github.sha }}
@@ -236,7 +223,6 @@ jobs:
             -var backend_image="$ECR_REGISTRY/$ECR_REPOSITORY_BACKEND:$IMAGE_TAG" \
             -var frontend_image="$ECR_REGISTRY/$ECR_REPOSITORY_FRONTEND:$IMAGE_TAG" \
             -auto-approve
-  
       - name: Check Helm deployment status
         run: |
           aws eks update-kubeconfig --name digital-store-cluster --region us-east-1
@@ -254,7 +240,6 @@ jobs:
           aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
           aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
           aws-region: ${{ env.AWS_REGION }}
-  
       - name: Check EKS Cluster Status
         run: |
           CLUSTER_STATUS=$(aws eks describe-cluster --name ${{ env.EKS_CLUSTER_NAME }} --query 'cluster.status' --output text)
@@ -263,30 +248,25 @@ jobs:
             exit 1
           fi
           echo "EKS Cluster is ACTIVE and ready"
-  
       - name: Update kubeconfig
         run: aws eks update-kubeconfig --name ${{ env.EKS_CLUSTER_NAME }} --region ${{ env.AWS_REGION }}
-  
       - name: Verify Pods Status
         run: |
           echo "Waiting for pods to be ready..."
           kubectl wait --for=condition=ready pod -l app=backend --timeout=300s
           kubectl wait --for=condition=ready pod -l app=frontend --timeout=300s
           echo "All pods are ready!"
-  
       - name: Verify Application Logs
         run: |
           echo "Checking backend logs..."
           kubectl logs -l app=backend --tail=100
           echo "Checking frontend logs..."
           kubectl logs -l app=frontend --tail=100
-  
       - name: Wait for Ingress ALB
         run: |
           echo "Waiting for Ingress ALB to be ready..."
           kubectl wait --for=condition=ready ingress/digital-store-alb -n default --timeout=300s
           echo "Ingress ALB is ready!"
-  
       - name: Verify application health via ALB
         run: |
           echo "Getting ALB hostname..."
@@ -301,4 +281,3 @@ jobs:
           echo "Testing application health..."
           curl --fail http://$ALB_HOST/api/health
           echo "Application health check passed!"
-
