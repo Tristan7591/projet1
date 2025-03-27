@@ -102,7 +102,6 @@ jobs:
       - name: Run Gitleaks
         continue-on-error: true
         uses: gitleaks/gitleaks-action@v2
-        
       - name: Install Grype
         run: |
           curl -sSfL https://raw.githubusercontent.com/anchore/grype/main/install.sh | sh -s -- -b /usr/local/bin
@@ -117,26 +116,23 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v3
-      - uses: hashicorp/setup-terraform@v1
+      - uses: hashicorp/setup-terraform@v2 # Mise à jour vers v2 pour compatibilité
         with:
           terraform_version: 1.5.0
       - name: Configure AWS credentials
-        uses: aws-actions/configure-aws-credentials@v1
+        uses: aws-actions/configure-aws-credentials@v2 # Mise à jour vers v2
         with:
           aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
           aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
           aws-region: ${{ env.AWS_REGION }}
 
-      # Install Helm for Terraform provider
       - name: Install Helm
         run: |
           curl -fsSL -o get_helm.sh https://raw.githubusercontent.com/helm/helm/main/scripts/get-helm-3
           chmod +x get_helm.sh
           ./get_helm.sh
           helm version
-          mkdir -p ~/.helm/repository
 
-      # Étape 1: Déployer l'infrastructure avec Terraform
       - name: Get db_password from AWS SSM
         id: get-db-password
         run: |
@@ -147,14 +143,23 @@ jobs:
             --output text)
           echo "TF_VAR_db_password=$DB_PASSWORD" >> $GITHUB_ENV
 
-      - name: Terraform Init & Apply
+      - name: Wait for EKS cluster
+        run: |
+          aws eks wait cluster-active --region ${{ env.AWS_REGION }} --name ${{ env.EKS_CLUSTER_NAME }}
+
+      - name: Terraform Init
         run: |
           cd terraform
           terraform init
-          terraform plan -out=tfplan
-          terraform apply tfplan
 
-      # Étape 2: Login à ECR et push des images
+ ⇒     - name: Terraform Apply
+        run: |
+          cd terraform
+          terraform apply -auto-approve
+        env:
+          TF_VAR_backend_image: "${{ env.ECR_REGISTRY }}/${{ env.ECR_REPOSITORY_BACKEND }}:${{ env.IMAGE_TAG }}"
+          TF_VAR_frontend_image: "${{ env.ECR_REGISTRY }}/${{ env.ECR_REPOSITORY_FRONTEND }}:${{ env.IMAGE_TAG }}"
+
       - name: Login to Amazon ECR
         id: login-ecr
         uses: aws-actions/amazon-ecr-login@v2
@@ -182,8 +187,14 @@ jobs:
 
       - name: Verify ECR Images
         run: |
-          aws ecr describe-images --repository-name $ECR_REPOSITORY_BACKEND --query 'imageDetails[*].imageTags[?contains(@, `$IMAGE_TAG`)]'
-          aws ecr describe-images --repository-name $ECR_REPOSITORY_FRONTEND --query 'imageDetails[*].imageTags[?contains(@, `$IMAGE_TAG`)]'
+          aws ecr describe-images --repository-name $ECR_REPOSITORY_BACKEND --query 'imageDetails[*].imageTags[?contains(@, `${{ env.IMAGE_TAG }}`)]'
+          aws ecr describe-images --repository-name $ECR_REPOSITORY_FRONTEND --query 'imageDetails[*].imageTags[?contains(@, `${{ env.IMAGE_TAG }}`)]'
+
+      - name: Check Helm Deployment
+        run: |
+          cd terraform
+          helm list -n default
+          helm status digital-store -n default || echo "Helm failed, check logs"
 
   eks-deploy:
     needs: terraform-deploy
@@ -191,13 +202,12 @@ jobs:
     steps:
       - uses: actions/checkout@v3
       - name: Configure AWS credentials
-        uses: aws-actions/configure-aws-credentials@v1
+        uses: aws-actions/configure-aws-credentials@v2
         with:
           aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
           aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
           aws-region: ${{ env.AWS_REGION }}
 
-      # Install Helm
       - name: Install Helm
         run: |
           curl -fsSL -o get_helm.sh https://raw.githubusercontent.com/helm/helm/main/scripts/get-helm-3
@@ -231,7 +241,6 @@ jobs:
           kubectl get nodes
           kubectl get namespaces
 
-      # Wait for the cluster to be fully ready
       - name: Wait for EKS cluster to be fully ready
         run: |
           echo "Waiting for all nodes to be ready..."
@@ -240,7 +249,6 @@ jobs:
             sleep 10
           done
           echo "All nodes are now ready"
-          
           echo "Waiting for core components..."
           kubectl wait --for=condition=available --timeout=300s deployment -l k8s-app=kube-dns -n kube-system
           kubectl wait --for=condition=available --timeout=300s deployment -l app.kubernetes.io/name=aws-load-balancer-controller -n kube-system || true
@@ -255,7 +263,6 @@ jobs:
           sed -i "s|image:.*digital-store/frontend:.*|image: $ECR_REGISTRY/digital-store/frontend:$IMAGE_TAG|g" k8s/frontend/deployment.yaml
           kubectl apply -f k8s
 
-      # Check Helm release status
       - name: Check Helm release status
         run: |
           if kubectl get namespace default; then
@@ -277,9 +284,8 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v3
-
       - name: Configure AWS credentials
-        uses: aws-actions/configure-aws-credentials@v1
+        uses: aws-actions/configure-aws-credentials@v2
         with:
           aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
           aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
@@ -297,7 +303,6 @@ jobs:
       - name: Update kubeconfig
         run: aws eks update-kubeconfig --name ${{ env.EKS_CLUSTER_NAME }} --region ${{ env.AWS_REGION }}
 
-      # 1. Vérifier que les pods sont prêts
       - name: Verify Pods Status
         run: |
           echo "Waiting for pods to be ready..."
@@ -305,7 +310,6 @@ jobs:
           kubectl wait --for=condition=ready pod -l app=frontend --timeout=300s
           echo "All pods are ready!"
 
-      # 2. Vérifier les logs des pods
       - name: Verify Application Logs
         run: |
           echo "Checking backend logs..."
@@ -313,14 +317,12 @@ jobs:
           echo "Checking frontend logs..."
           kubectl logs -l app=frontend --tail=100
 
-      # 3. Vérifier l'Ingress ALB
       - name: Wait for Ingress ALB
         run: |
           echo "Waiting for Ingress ALB to be ready..."
           kubectl wait --for=condition=ready ingress/digital-store-alb -n default --timeout=300s
           echo "Ingress ALB is ready!"
 
-      # 4. Vérifier la santé de l'application via ALB
       - name: Verify application health via ALB
         run: |
           echo "Getting ALB hostname..."
@@ -335,5 +337,4 @@ jobs:
           echo "Testing application health..."
           curl --fail http://$ALB_HOST/api/health
           echo "Application health check passed!"
-
 
