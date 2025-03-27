@@ -5,7 +5,6 @@ verifier la coherence des variables avec terraform , il faut que github action e
 decommenter la partie rds pour le passage test/prod
 
 
-
 delete eks cluster:
 aws eks delete-nodegroup --cluster-name digital-store-cluster --nodegroup-name digital-store-node-group
 aws eks delete-cluster --name digital-store-cluster
