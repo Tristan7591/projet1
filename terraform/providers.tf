@@ -42,11 +42,4 @@ provider "kubernetes" {
     args        = ["eks", "get-token", "--cluster-name", aws_eks_cluster.main.name]
     command     = "aws"
   }
-  
-  # Simple augmentation du timeout
-  timeouts {
-    create = "30m"
-    update = "30m"
-    delete = "30m"
-  }
 }
