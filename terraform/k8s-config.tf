@@ -116,35 +116,6 @@ resource "helm_release" "digital_store" {
   }
 }
 
-# Backup Helm via null_resource (renommé pour éviter la duplication)
-resource "null_resource" "helm_backup" {
-  provisioner "local-exec" {
-    command = <<EOT
-      helm upgrade --install digital-store ${path.module}/chart \
-        --namespace default \
-        --values ${path.module}/chart/values.yaml \
-        --timeout 900s \
-        --atomic \
-        --cleanup-on-fail \
-        --wait \
-        --set backend.image.repository=${var.backend_image} \
-        --set frontend.image.repository=${var.frontend_image}
-    EOT
-    environment = {
-      KUBECONFIG = var.kubeconfig_path
-    }
-  }
-
-  triggers = {
-    helm_release_id = join("", helm_release.digital_store[*].id)  # Compatible avec count
-  }
-
-  depends_on = [
-    aws_eks_cluster.main,
-    aws_eks_node_group.main,
-    null_resource.helm_prepare
-  ]
-}
 
 # Fallback avec kubectl si Helm échoue
 resource "null_resource" "kubectl_fallback" {
