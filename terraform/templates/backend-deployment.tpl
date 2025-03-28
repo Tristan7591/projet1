@@ -7,7 +7,7 @@ metadata:
     app: {{ .Values.appName | default "digital-store" }}
     tier: backend
 spec:
-  replicas: {{ .Values.backend.replicas | default 2 }}
+  replicas: {{ .Values.backend.replicas | default 1 }}
   selector:
     matchLabels:
       app: {{ .Values.appName | default "digital-store" }}
