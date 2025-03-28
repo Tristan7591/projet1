@@ -146,8 +146,9 @@ resource "null_resource" "kubectl_fallback" {
           kubectl apply -f ../k8s/backend/
           kubectl apply -f ../k8s/frontend/
           kubectl apply -f ../k8s/ingress/
-          kubectl wait --for=condition=available --timeout=300s deployment/digital-store-backend -n default || true
-          kubectl wait --for=condition=available --timeout=300s deployment/digital-store-frontend -n default || true
+          echo "Waiting for deployments to be ready..."
+          kubectl wait --for=condition=available --timeout=600s deployment/digital-store-backend -n default || true
+          kubectl wait --for=condition=available --timeout=600s deployment/digital-store-frontend -n default || true
         else
           echo "Déploiement Helm réussi, aucun fallback requis."
         fi

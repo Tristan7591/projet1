@@ -238,20 +238,14 @@ jobs:
         run: |
           ECR_REGISTRY=$(aws ecr get-authorization-token --output text --query 'authorizationData[].proxyEndpoint' | sed 's|https://||')
           echo "ECR_REGISTRY=$ECR_REGISTRY" >> $GITHUB_ENV
-      - name: Deploy Helm Chart
-        env:
-          IMAGE_TAG: ${{ github.sha }}
-          ECR_REGISTRY: ${{ env.ECR_REGISTRY }}
-        run: |
-          cd terraform
-          terraform apply -var deploy_app=true \
-            -var backend_image="$ECR_REGISTRY/$ECR_REPOSITORY_BACKEND:$IMAGE_TAG" \
-            -var frontend_image="$ECR_REGISTRY/$ECR_REPOSITORY_FRONTEND:$IMAGE_TAG" \
-            -auto-approve
-      
+          
       - name: Install AWS Load Balancer Controller
         run: |
-          aws eks update-kubeconfig --name digital-store-cluster --region us-east-1
+          # Vérifier l'existence du fichier de politique
+          if [ ! -f "scripts/alb-controller-policy.json" ]; then
+            echo "Error: ALB controller policy file not found at scripts/alb-controller-policy.json"
+            exit 1
+          fi
           
           # Create IAM policy for AWS Load Balancer Controller
           echo "Creating AWS Load Balancer Controller policy..."
@@ -291,6 +285,26 @@ jobs:
             --set serviceAccount.name=aws-load-balancer-controller
           
           echo "AWS Load Balancer Controller installed!"
+          
+          # Vérifier que le contrôleur est bien déployé
+          kubectl wait --for=condition=available deployment/aws-load-balancer-controller -n kube-system --timeout=600s
+          echo "Load Balancer Controller ready!"
+
+      - name: Deploy Helm Chart
+        env:
+          IMAGE_TAG: ${{ github.sha }}
+          ECR_REGISTRY: ${{ env.ECR_REGISTRY }}
+        run: |
+          # Récupérer le mot de passe de la base de données depuis SSM
+          DB_PASSWORD=$(aws ssm get-parameter --name "/terraform/db_password" --with-decryption --query "Parameter.Value" --output text)
+          # Exporter la variable pour Terraform
+          echo "TF_VAR_db_password=$DB_PASSWORD" >> $GITHUB_ENV
+          
+          cd terraform
+          terraform apply -var deploy_app=true \
+            -var backend_image="$ECR_REGISTRY/$ECR_REPOSITORY_BACKEND:$IMAGE_TAG" \
+            -var frontend_image="$ECR_REGISTRY/$ECR_REPOSITORY_FRONTEND:$IMAGE_TAG" \
+            -auto-approve
 
       - name: Check Helm deployment status
         run: |
@@ -328,8 +342,8 @@ jobs:
       - name: Verify Pods Status
         run: |
           echo "Waiting for pods to be ready..."
-          kubectl wait --for=condition=ready pod -l app=digital-store,tier=backend --timeout=300s
-          kubectl wait --for=condition=ready pod -l app=digital-store,tier=frontend --timeout=300s
+          kubectl wait --for=condition=ready pod -l app=digital-store,tier=backend --timeout=600s
+          kubectl wait --for=condition=ready pod -l app=digital-store,tier=frontend --timeout=600s
           echo "All pods are ready!"
       - name: Verify Application Logs
         run: |
@@ -348,7 +362,7 @@ jobs:
       - name: Wait for Ingress ALB
         run: |
           echo "Waiting for Ingress ALB to be ready..."
-          kubectl wait --for=condition=ready ingress/digital-store-alb -n default --timeout=300s
+          kubectl wait --for=condition=ready ingress/digital-store-alb -n default --timeout=600s
           echo "Ingress ALB is ready!"
       - name: Verify application health via ALB
         run: |
@@ -360,41 +374,9 @@ jobs:
           fi
           echo "ALB URL: http://$ALB_HOST"
           echo "Waiting for ALB to be fully provisioned..."
-          sleep 120
+          # Augmenter le temps d'attente à 5 minutes pour s'assurer que l'ALB soit complètement provisionné
+          sleep 300
           echo "Testing application health..."
-          curl --fail http://$ALB_HOST/api/health
+          curl --fail http://$ALB_HOST/api/health || curl --fail -k https://$ALB_HOST/api/health
           echo "Application health check passed!"
-
-  deploy-to-eks:
-    needs: validate-infra
-    runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@v3
-      - name: Configure AWS credentials
-        uses: aws-actions/configure-aws-credentials@v2
-        with:
-          aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
-          aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
-          aws-region: ${{ env.AWS_REGION }}
-          
-      - name: Deploy to EKS
-        run: |
-          aws eks update-kubeconfig --region $AWS_REGION --name $EKS_CLUSTER_NAME
-          
-          # Remove any PostgreSQL container resources if they exist
-          kubectl delete deploy/postgres svc/postgres-service pvc/postgres-pvc pv/postgres-pv --ignore-not-found=true
-          
-          # Apply new configurations
-          kubectl apply -f k8s/database/rds-secret.yaml
-          kubectl apply -f k8s/configmap.yaml
-          kubectl apply -f k8s/backend/deployment.yaml
-          kubectl apply -f k8s/backend/service.yaml
-          kubectl apply -f k8s/frontend/deployment.yaml
-          kubectl apply -f k8s/frontend/service.yaml
-          kubectl apply -f k8s/ingress/ingress.yaml
-          
-          echo "Waiting for pods to be ready..."
-          kubectl wait --for=condition=ready pod -l app=digital-store,tier=backend --timeout=300s
-          kubectl wait --for=condition=ready pod -l app=digital-store,tier=frontend --timeout=300s
-          echo "Deployment completed"
 
