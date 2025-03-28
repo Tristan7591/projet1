@@ -77,7 +77,7 @@ variable "db_name" {
 variable "db_username" {
   description = "Username for the database"
   type        = string
-  default     = "Tristan"
+  default     = "devops"
 }
 
 variable "db_password" {

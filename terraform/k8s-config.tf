@@ -100,6 +100,19 @@ resource "helm_release" "digital_store" {
     name  = "frontend.image.repository"
     value = var.frontend_image
   }
+  
+  # Récupérer les valeurs RDS depuis l'instance
+  set {
+    name  = "secrets.rds.host"
+    value = aws_db_instance.postgres.address
+  }
+  
+  # Le mot de passe est récupéré via un script séparé qui utilise SSM
+  # Mais nous passons une valeur par défaut pour le déploiement initial
+  set {
+    name  = "secrets.rds.password"
+    value = "db-password-from-ssm"
+  }
 }
 
 
@@ -128,6 +141,7 @@ resource "null_resource" "kubectl_fallback" {
           echo "Déploiement Helm échoué, passage au fallback kubectl..."
           kubectl delete deployment,service,ingress,configmap -l app=digital-store -n default --ignore-not-found=true
           sleep 30
+          kubectl apply -f ../k8s/database/rds-secret.yaml
           kubectl apply -f ../k8s/configmap.yaml
           kubectl apply -f ../k8s/backend/
           kubectl apply -f ../k8s/frontend/
@@ -140,6 +154,7 @@ resource "null_resource" "kubectl_fallback" {
       else
         if [ "${var.deploy_app}" == "true" ]; then
           echo "Helm release non trouvée, déploiement direct avec kubectl..."
+          kubectl apply -f ../k8s/database/rds-secret.yaml
           kubectl apply -f ../k8s/configmap.yaml
           kubectl apply -f ../k8s/backend/
           kubectl apply -f ../k8s/frontend/

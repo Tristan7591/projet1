@@ -29,5 +29,8 @@ frontend:
 secrets:
   rds:
     name: rds-credentials
+    # Ces valeurs sont des placeholders, écrasées lors du déploiement
+    host: "placeholder-db-host"
+    password: "placeholder-db-password"
 configMap:
   name: digital-store-config 

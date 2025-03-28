@@ -31,6 +31,9 @@ kind: Secret
 metadata:
   name: rds-credentials
   namespace: default
+  labels:
+    app: digital-store
+    type: database-credentials
 type: Opaque
 data:
   DB_NAME: ${DB_NAME_B64}
@@ -41,4 +44,18 @@ data:
 EOF
 
 echo "RDS secret template created at k8s/database/rds-secret.yaml"
-echo "Ready to be applied to Kubernetes cluster" 
+
+# Vérifier si Helm est utilisé pour le déploiement
+if [ -n "$(helm list -n default -q 2>/dev/null | grep digital-store)" ]; then
+  echo "Mise à jour des secrets RDS dans le déploiement Helm..."
+  helm upgrade digital-store terraform/chart \
+    --reuse-values \
+    --set secrets.rds.host="$RDS_HOST" \
+    --set secrets.rds.password="$DB_PASSWORD"
+  
+  echo "Secrets RDS mis à jour dans Helm."
+else
+  echo "Aucun déploiement Helm détecté, le secret Kubernetes standard sera utilisé."
+fi
+
+echo "Configuration RDS terminée." 

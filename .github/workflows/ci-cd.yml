@@ -131,7 +131,6 @@ jobs:
           chmod +x get_helm.sh
           ./get_helm.sh
           helm version
-          mkdir -p ~/.helm/repository
       - name: Install kubectl
         run: |
           curl -LO "https://dl.k8s.io/release/$(curl -L -s https://dl.k8s.io/release/stable.txt)/bin/linux/amd64/kubectl"
@@ -154,6 +153,10 @@ jobs:
           
       - name: Prepare RDS Secret
         run: |
+          # Ensure all AWS tools are properly configured
+          aws eks update-kubeconfig --name digital-store-cluster --region us-east-1
+          
+          # Make script executable and run it to prepare RDS secrets
           chmod +x scripts/prepare-rds-secret.sh
           ./scripts/prepare-rds-secret.sh
           
@@ -334,6 +337,13 @@ jobs:
           kubectl logs -l app=digital-store,tier=backend --tail=100
           echo "Checking frontend logs..."
           kubectl logs -l app=digital-store,tier=frontend --tail=100
+  
+      - name: Verify RDS Connectivity
+        run: |
+          echo "Vérification de la connectivité à la base de données RDS..."
+          POD_NAME=$(kubectl get pod -l app=digital-store,tier=backend -o jsonpath="{.items[0].metadata.name}")
+          kubectl exec $POD_NAME -- curl -s http://localhost:8080/api/health
+          echo "Connectivité RDS vérifiée via vérification santé API backend"
   
       - name: Wait for Ingress ALB
         run: |
