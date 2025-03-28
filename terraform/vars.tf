@@ -95,7 +95,7 @@ variable "db_instance_class" {
 variable "db_allocated_storage" {
   description = "Allocated storage for the database (in GB)"
   type        = number
-  default     = 5  # Minimum pour les tests
+  default     = 20  # Minimum requis pour PostgreSQL avec gp3
 }
 
 # Tags communs
