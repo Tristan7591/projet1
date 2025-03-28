@@ -3,6 +3,9 @@ kind: Service
 metadata:
   name: {{ .Release.Name }}-backend-service
   namespace: {{ .Release.Namespace | default "default" }}
+  labels:
+    app: {{ .Values.appName | default "digital-store" }}
+    tier: backend
 spec:
   type: ClusterIP
   selector:

@@ -3,6 +3,9 @@ kind: Service
 metadata:
   name: digital-store-frontend-service
   namespace: default
+  labels:
+    app: digital-store
+    tier: frontend
 spec:
   type: ClusterIP
   selector:

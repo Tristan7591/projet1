@@ -9,9 +9,9 @@ data:
       application:
         name: digital-store
       datasource:
-        url: jdbc:postgresql://$${DB_HOST:localhost}:5432/$${DB_NAME:digitalstore}
-        username: $${DB_USERNAME:postgres}
-        password: $${DB_PASSWORD:postgres}
+        url: jdbc:postgresql://$${DB_HOST}:$${DB_PORT:5432}/$${DB_NAME:digitalstore}
+        username: $${DB_USERNAME}
+        password: $${DB_PASSWORD}
         driver-class-name: org.postgresql.Driver
       jpa:
         hibernate:

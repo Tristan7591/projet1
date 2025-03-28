@@ -28,12 +28,12 @@ resource "aws_eks_node_group" "main" {
   subnet_ids      = local.private_subnet_ids
 
   scaling_config {
-    desired_size = 2
-    max_size     = 4
-    min_size     = 1
+    desired_size = var.eks_node_group_desired_size
+    max_size     = var.eks_node_group_max_size
+    min_size     = var.eks_node_group_min_size
   }
 
-  instance_types = ["t3.medium"]
+  instance_types = var.eks_node_group_instance_types
 
   update_config {
     max_unavailable = 1

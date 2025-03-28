@@ -3,6 +3,9 @@ kind: Service
 metadata:
   name: {{ .Release.Name }}-frontend-service
   namespace: {{ .Release.Namespace | default "default" }}
+  labels:
+    app: {{ .Values.appName | default "digital-store" }}
+    tier: frontend
 spec:
   type: ClusterIP
   selector:

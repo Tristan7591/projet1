@@ -1,4 +1,6 @@
 # ------- Application -------
+note 
+presentation_projet_devops*
 # Java / Maven
 application/target/
 application/mvnw

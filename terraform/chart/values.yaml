@@ -1,33 +1,33 @@
 appName: digital-store
 
 backend:
-  replicas: 2
+  replicas: 1
   image:
     repository: "797394900921.dkr.ecr.us-east-1.amazonaws.com/digital-store/backend"
     tag: "latest"
   resources:
     requests:
+      memory: "256Mi"
+      cpu: "100m"
+    limits:
       memory: "512Mi"
       cpu: "200m"
-    limits:
-      memory: "1Gi"
-      cpu: "500m"
 
 frontend:
-  replicas: 2
+  replicas: 1
   image:
     repository: "797394900921.dkr.ecr.us-east-1.amazonaws.com/digital-store/frontend"
     tag: "latest"
   resources:
     requests:
+      memory: "64Mi"
+      cpu: "50m"
+    limits:
       memory: "128Mi"
       cpu: "100m"
-    limits:
-      memory: "256Mi"
-      cpu: "200m"
 
 secrets:
-  postgres:
-    name: postgres-credentials
+  rds:
+    name: rds-credentials
 configMap:
   name: digital-store-config 

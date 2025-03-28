@@ -25,11 +25,11 @@ spec:
             - containerPort: 80
           resources:
             requests:
-              memory: {{ .Values.frontend.resources.requests.memory | default "128Mi" }}
-              cpu: {{ .Values.frontend.resources.requests.cpu | default "100m" }}
+              memory: {{ .Values.frontend.resources.requests.memory | default "64Mi" }}
+              cpu: {{ .Values.frontend.resources.requests.cpu | default "50m" }}
             limits:
-              memory: {{ .Values.frontend.resources.limits.memory | default "256Mi" }}
-              cpu: {{ .Values.frontend.resources.limits.cpu | default "200m" }}
+              memory: {{ .Values.frontend.resources.limits.memory | default "128Mi" }}
+              cpu: {{ .Values.frontend.resources.limits.cpu | default "100m" }}
           readinessProbe:
             httpGet:
               path: /

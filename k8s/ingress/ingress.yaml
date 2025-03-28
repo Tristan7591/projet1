@@ -3,6 +3,8 @@ kind: Ingress
 metadata:
   name: digital-store-alb
   namespace: default
+  labels:
+    app: digital-store
   annotations:
     kubernetes.io/ingress.class: alb
     alb.ingress.kubernetes.io/scheme: internet-facing

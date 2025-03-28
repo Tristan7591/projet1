@@ -46,19 +46,19 @@ variable "eks_cluster_name" {
 variable "eks_node_group_instance_types" {
   description = "Instance types for the EKS node group"
   type        = list(string)
-  default     = ["t3.medium"]
+  default     = ["t3.small"]
 }
 
 variable "eks_node_group_desired_size" {
   description = "Desired size of the EKS node group"
   type        = number
-  default     = 2
+  default     = 1  # Minimum pour les tests
 }
 
 variable "eks_node_group_max_size" {
   description = "Maximum size of the EKS node group"
   type        = number
-  default     = 4
+  default     = 2  # Réduit pour les tests
 }
 
 variable "eks_node_group_min_size" {
@@ -89,13 +89,13 @@ variable "db_password" {
 variable "db_instance_class" {
   description = "RDS instance class"
   type        = string
-  default     = "db.t3.small"
+  default     = "db.t3.micro"
 }
 
 variable "db_allocated_storage" {
   description = "Allocated storage for the database (in GB)"
   type        = number
-  default     = 20
+  default     = 5  # Minimum pour les tests
 }
 
 # Tags communs

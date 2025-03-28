@@ -32,29 +32,15 @@ resource "local_file" "k8s_ingress" {
   filename = "../k8s/ingress/ingress.yaml"
 }
 
-resource "local_file" "k8s_postgres_secret" {
-  content = templatefile("${path.module}/templates/postgres-secret.tpl", {
-    postgres_user     = base64encode(var.db_username)
-    postgres_password = base64encode(var.db_password)
-    postgres_db       = base64encode(var.db_name)
-    postgres_host     = base64encode(aws_db_instance.postgres.address)
+resource "local_file" "k8s_rds_secret" {
+  content = templatefile("${path.module}/templates/rds-secret.tpl", {
+    db_name     = base64encode(var.db_name)
+    db_username = base64encode(var.db_username)
+    # Password is managed by SSM and the prepare-rds-secret.sh script
+    db_host     = base64encode(aws_db_instance.postgres.address)
+    db_port     = base64encode("5432")
   })
-  filename = "../k8s/database/postgres/secret.yaml"
-}
-
-resource "local_file" "k8s_postgres_deployment" {
-  content = templatefile("${path.module}/templates/postgres-deployment.tpl", {})
-  filename = "../k8s/database/postgres/deployment.yaml"
-}
-
-resource "local_file" "k8s_postgres_service" {
-  content = templatefile("${path.module}/templates/postgres-service.tpl", {})
-  filename = "../k8s/database/postgres/service.yaml"
-}
-
-resource "local_file" "k8s_postgres_storage" {
-  content = templatefile("${path.module}/templates/postgres-storage.tpl", {})
-  filename = "../k8s/database/postgres/storage.yaml"
+  filename = "../k8s/database/rds-secret.yaml"
 }
 
 resource "local_file" "k8s_configmap" {
@@ -153,7 +139,8 @@ resource "null_resource" "kubectl_fallback" {
     local_file.k8s_backend_deployment,
     local_file.k8s_frontend_deployment,
     local_file.k8s_ingress,
-    local_file.k8s_configmap
+    local_file.k8s_configmap,
+    local_file.k8s_rds_secret
   ]
 
   triggers = {

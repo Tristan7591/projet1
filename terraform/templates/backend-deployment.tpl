@@ -25,11 +25,11 @@ spec:
             - containerPort: 8080
           resources:
             requests:
-              memory: {{ .Values.backend.resources.requests.memory | default "512Mi" }}
-              cpu: {{ .Values.backend.resources.requests.cpu | default "200m" }}
+              memory: {{ .Values.backend.resources.requests.memory | default "256Mi" }}
+              cpu: {{ .Values.backend.resources.requests.cpu | default "100m" }}
             limits:
-              memory: {{ .Values.backend.resources.limits.memory | default "1Gi" }}
-              cpu: {{ .Values.backend.resources.limits.cpu | default "500m" }}
+              memory: {{ .Values.backend.resources.limits.memory | default "512Mi" }}
+              cpu: {{ .Values.backend.resources.limits.cpu | default "200m" }}
           readinessProbe:
             httpGet:
               path: /api/actuator/health
@@ -49,23 +49,28 @@ spec:
             - name: DB_USERNAME
               valueFrom:
                 secretKeyRef:
-                  name: {{ .Values.secrets.postgres.name | default "postgres-credentials" }}
-                  key: POSTGRES_USER
+                  name: {{ .Values.secrets.rds.name | default "rds-credentials" }}
+                  key: DB_USERNAME
             - name: DB_PASSWORD
               valueFrom:
                 secretKeyRef:
-                  name: {{ .Values.secrets.postgres.name | default "postgres-credentials" }}
-                  key: POSTGRES_PASSWORD
+                  name: {{ .Values.secrets.rds.name | default "rds-credentials" }}
+                  key: DB_PASSWORD
             - name: DB_NAME
               valueFrom:
                 secretKeyRef:
-                  name: {{ .Values.secrets.postgres.name | default "postgres-credentials" }}
-                  key: POSTGRES_DB
+                  name: {{ .Values.secrets.rds.name | default "rds-credentials" }}
+                  key: DB_NAME
             - name: DB_HOST
               valueFrom:
                 secretKeyRef:
-                  name: {{ .Values.secrets.postgres.name | default "postgres-credentials" }}
-                  key: POSTGRES_HOST
+                  name: {{ .Values.secrets.rds.name | default "rds-credentials" }}
+                  key: DB_HOST
+            - name: DB_PORT
+              valueFrom:
+                secretKeyRef:
+                  name: {{ .Values.secrets.rds.name | default "rds-credentials" }}
+                  key: DB_PORT
       volumes:
         - name: config-volume
           configMap:

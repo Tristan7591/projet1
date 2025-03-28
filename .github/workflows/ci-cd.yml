@@ -152,6 +152,19 @@ jobs:
         run: |
           cd terraform
           terraform apply -var deploy_app=false -auto-approve
+          
+      - name: Prepare RDS Secret
+        run: |
+          chmod +x scripts/prepare-rds-secret.sh
+          ./scripts/prepare-rds-secret.sh
+          
+      - name: Verify RDS Secret
+        run: |
+          if [ ! -f "k8s/database/rds-secret.yaml" ]; then
+            echo "Error: RDS secret file not created"
+            exit 1
+          fi
+          echo "RDS secret file generated successfully"
 
   build-images:
     needs: terraform-deploy
@@ -236,12 +249,56 @@ jobs:
             -var backend_image="$ECR_REGISTRY/$ECR_REPOSITORY_BACKEND:$IMAGE_TAG" \
             -var frontend_image="$ECR_REGISTRY/$ECR_REPOSITORY_FRONTEND:$IMAGE_TAG" \
             -auto-approve
-  
+      
+      - name: Install AWS Load Balancer Controller
+        run: |
+          aws eks update-kubeconfig --name digital-store-cluster --region us-east-1
+          
+          # Create IAM policy for AWS Load Balancer Controller
+          echo "Creating AWS Load Balancer Controller policy..."
+          POLICY_ARN=$(aws iam list-policies --query "Policies[?PolicyName=='AWSLoadBalancerControllerIAMPolicy'].Arn" --output text)
+          
+          if [ -z "$POLICY_ARN" ]; then
+            echo "Policy doesn't exist, creating..."
+            aws iam create-policy \
+              --policy-name AWSLoadBalancerControllerIAMPolicy \
+              --policy-document file://scripts/alb-controller-policy.json
+            
+            POLICY_ARN=$(aws iam list-policies --query "Policies[?PolicyName=='AWSLoadBalancerControllerIAMPolicy'].Arn" --output text)
+          else
+            echo "Policy already exists at: $POLICY_ARN"
+          fi
+          
+          # Create service account
+          echo "Creating k8s service account..."
+          eksctl create iamserviceaccount \
+            --cluster=digital-store-cluster \
+            --namespace=kube-system \
+            --name=aws-load-balancer-controller \
+            --attach-policy-arn=$POLICY_ARN \
+            --override-existing-serviceaccounts \
+            --region us-east-1 \
+            --approve
+          
+          # Install AWS Load Balancer Controller
+          echo "Installing AWS Load Balancer Controller..."
+          helm repo add eks https://aws.github.io/eks-charts
+          helm repo update
+          
+          helm upgrade --install aws-load-balancer-controller eks/aws-load-balancer-controller \
+            -n kube-system \
+            --set clusterName=digital-store-cluster \
+            --set serviceAccount.create=false \
+            --set serviceAccount.name=aws-load-balancer-controller
+          
+          echo "AWS Load Balancer Controller installed!"
+
       - name: Check Helm deployment status
         run: |
           aws eks update-kubeconfig --name digital-store-cluster --region us-east-1
           helm list -n default
-          kubectl get pods -n default
+          kubectl get pods -n default -o wide
+          kubectl get pods -n kube-system -l app.kubernetes.io/name=aws-load-balancer-controller
 
   validate-infra:
     needs: deploy-app
@@ -270,16 +327,16 @@ jobs:
       - name: Verify Pods Status
         run: |
           echo "Waiting for pods to be ready..."
-          kubectl wait --for=condition=ready pod -l app=backend --timeout=300s
-          kubectl wait --for=condition=ready pod -l app=frontend --timeout=300s
+          kubectl wait --for=condition=ready pod -l app=digital-store,tier=backend --timeout=300s
+          kubectl wait --for=condition=ready pod -l app=digital-store,tier=frontend --timeout=300s
           echo "All pods are ready!"
   
       - name: Verify Application Logs
         run: |
           echo "Checking backend logs..."
-          kubectl logs -l app=backend --tail=100
+          kubectl logs -l app=digital-store,tier=backend --tail=100
           echo "Checking frontend logs..."
-          kubectl logs -l app=frontend --tail=100
+          kubectl logs -l app=digital-store,tier=frontend --tail=100
   
       - name: Wait for Ingress ALB
         run: |
@@ -301,4 +358,37 @@ jobs:
           echo "Testing application health..."
           curl --fail http://$ALB_HOST/api/health
           echo "Application health check passed!"
+
+  deploy-to-eks:
+    needs: validate-infra
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v3
+      - name: Configure AWS credentials
+        uses: aws-actions/configure-aws-credentials@v2
+        with:
+          aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
+          aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+          aws-region: ${{ env.AWS_REGION }}
+          
+      - name: Deploy to EKS
+        run: |
+          aws eks update-kubeconfig --region $AWS_REGION --name $EKS_CLUSTER_NAME
+          
+          # Remove any PostgreSQL container resources if they exist
+          kubectl delete deploy/postgres svc/postgres-service pvc/postgres-pvc pv/postgres-pv --ignore-not-found=true
+          
+          # Apply new configurations
+          kubectl apply -f k8s/database/rds-secret.yaml
+          kubectl apply -f k8s/configmap.yaml
+          kubectl apply -f k8s/backend/deployment.yaml
+          kubectl apply -f k8s/backend/service.yaml
+          kubectl apply -f k8s/frontend/deployment.yaml
+          kubectl apply -f k8s/frontend/service.yaml
+          kubectl apply -f k8s/ingress/ingress.yaml
+          
+          echo "Waiting for pods to be ready..."
+          kubectl wait --for=condition=ready pod -l app=digital-store,tier=backend --timeout=300s
+          kubectl wait --for=condition=ready pod -l app=digital-store,tier=frontend --timeout=300s
+          echo "Deployment completed"
 
