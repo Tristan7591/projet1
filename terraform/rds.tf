@@ -42,15 +42,3 @@ output "rds_port" {
   description = "The port the RDS PostgreSQL instance is listening on"
   value       = aws_db_instance.postgres.port
 }
-
-# Output the database name
-output "db_name" {
-  description = "The name of the database"
-  value       = aws_db_instance.postgres.db_name
-}
-
-# Output the database username
-output "db_username" {
-  description = "The master username for the database"
-  value       = aws_db_instance.postgres.username
-}
