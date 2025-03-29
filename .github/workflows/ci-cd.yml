@@ -287,8 +287,6 @@ jobs:
             echo "OIDC Provider already exists"
           fi
           
-      - name: Install AWS Load Balancer Controller
-        run: |
           # Vérifier l'existence du fichier de politique
           if [ ! -f "scripts/alb-controller-policy.json" ]; then
             echo "Error: ALB controller policy file not found at scripts/alb-controller-policy.json"
@@ -379,8 +377,11 @@ jobs:
           
           echo "Mot de passe récupéré avec succès depuis SSM"
           
-          # Passer directement le mot de passe à la commande terraform
+          # Initialiser Terraform avant d'appliquer les changements
           cd terraform
+          terraform init
+          
+          # Passer directement le mot de passe à la commande terraform
           terraform apply -var deploy_app=true \
             -var backend_image="$ECR_REGISTRY/$ECR_REPOSITORY_BACKEND:$IMAGE_TAG" \
             -var frontend_image="$ECR_REGISTRY/$ECR_REPOSITORY_FRONTEND:$IMAGE_TAG" \
