@@ -393,97 +393,97 @@ jobs:
           
           # Créer un fichier temporaire pour importer uniquement la ressource helm_release
           cat > deploy_helm_only.tf << EOF
-# Utilise les données du cluster EKS existant sans essayer de le recréer
-data "aws_eks_cluster" "existing" {
-  name = "digital-store-cluster"
-}
+          # Utilise les données du cluster EKS existant sans essayer de le recréer
+          data "aws_eks_cluster" "existing" {
+            name = "digital-store-cluster"
+          }
 
-# Utilise les données des repositories ECR existants
-data "aws_ecr_repository" "backend" {
-  name = "digital-store/backend"
-}
+          # Utilise les données des repositories ECR existants
+          data "aws_ecr_repository" "backend" {
+            name = "digital-store/backend"
+          }
 
-data "aws_ecr_repository" "frontend" {
-  name = "digital-store/frontend"
-}
+          data "aws_ecr_repository" "frontend" {
+            name = "digital-store/frontend"
+          }
 
-# Configuration des providers pour s'assurer qu'ils utilisent les ressources existantes
-provider "helm" {
-  kubernetes {
-    host                   = data.aws_eks_cluster.existing.endpoint
-    cluster_ca_certificate = base64decode(data.aws_eks_cluster.existing.certificate_authority[0].data)
-    exec {
-      api_version = "client.authentication.k8s.io/v1beta1"
-      args        = ["eks", "get-token", "--cluster-name", data.aws_eks_cluster.existing.name]
-      command     = "aws"
-    }
-  }
-}
+          # Configuration des providers pour s'assurer qu'ils utilisent les ressources existantes
+          provider "helm" {
+            kubernetes {
+              host                   = data.aws_eks_cluster.existing.endpoint
+              cluster_ca_certificate = base64decode(data.aws_eks_cluster.existing.certificate_authority[0].data)
+              exec {
+                api_version = "client.authentication.k8s.io/v1beta1"
+                args        = ["eks", "get-token", "--cluster-name", data.aws_eks_cluster.existing.name]
+                command     = "aws"
+              }
+            }
+          }
 
-provider "kubernetes" {
-  host                   = data.aws_eks_cluster.existing.endpoint
-  cluster_ca_certificate = base64decode(data.aws_eks_cluster.existing.certificate_authority[0].data)
-  exec {
-    api_version = "client.authentication.k8s.io/v1beta1"
-    args        = ["eks", "get-token", "--cluster-name", data.aws_eks_cluster.existing.name]
-    command     = "aws"
-  }
-}
+          provider "kubernetes" {
+            host                   = data.aws_eks_cluster.existing.endpoint
+            cluster_ca_certificate = base64decode(data.aws_eks_cluster.existing.certificate_authority[0].data)
+            exec {
+              api_version = "client.authentication.k8s.io/v1beta1"
+              args        = ["eks", "get-token", "--cluster-name", data.aws_eks_cluster.existing.name]
+              command     = "aws"
+            }
+          }
 
-# Référence à la base de données RDS existante
-data "aws_db_instance" "postgres" {
-  db_instance_identifier = "digital-store-db"
-}
+          # Référence à la base de données RDS existante
+          data "aws_db_instance" "postgres" {
+            db_instance_identifier = "digital-store-db"
+          }
 
-# Déploiement Helm qui utilise le cluster existant
-resource "helm_release" "digital_store" {
-  name             = "digital-store"
-  namespace        = "default"
-  chart            = "./chart"
-  timeout          = 600
-  atomic           = true
-  cleanup_on_fail  = true
-  
-  # Utilisation des images Docker spécifiées
-  set {
-    name  = "backend.image.repository"
-    value = "\${var.backend_image}"
-  }
+          # Déploiement Helm qui utilise le cluster existant
+          resource "helm_release" "digital_store" {
+            name             = "digital-store"
+            namespace        = "default"
+            chart            = "./chart"
+            timeout          = 600
+            atomic           = true
+            cleanup_on_fail  = true
+            
+            # Utilisation des images Docker spécifiées
+            set {
+              name  = "backend.image.repository"
+              value = "\${var.backend_image}"
+            }
 
-  set {
-    name  = "frontend.image.repository"
-    value = "\${var.frontend_image}"
-  }
-  
-  # Configuration des secrets RDS
-  set {
-    name  = "secrets.rds.host"
-    value = data.aws_db_instance.postgres.address
-  }
-  
-  set {
-    name  = "secrets.rds.password"
-    value = var.db_password
-  }
-}
+            set {
+              name  = "frontend.image.repository"
+              value = "\${var.frontend_image}"
+            }
+            
+            # Configuration des secrets RDS
+            set {
+              name  = "secrets.rds.host"
+              value = data.aws_db_instance.postgres.address
+            }
+            
+            set {
+              name  = "secrets.rds.password"
+              value = var.db_password
+            }
+          }
 
-# Variables nécessaires
-variable "backend_image" {
-  description = "Image Docker du backend"
-  type        = string
-}
+          # Variables nécessaires
+          variable "backend_image" {
+            description = "Image Docker du backend"
+            type        = string
+          }
 
-variable "frontend_image" {
-  description = "Image Docker du frontend"
-  type        = string
-}
+          variable "frontend_image" {
+            description = "Image Docker du frontend"
+            type        = string
+          }
 
-variable "db_password" {
-  description = "Mot de passe de la base de données"
-  type        = string
-  sensitive   = true
-}
-EOF
+          variable "db_password" {
+            description = "Mot de passe de la base de données"
+            type        = string
+            sensitive   = true
+          }
+          EOF
           
           # Appliquer uniquement le fichier temporaire avec un état Terraform séparé
           echo "Application du fichier Terraform temporaire..."
