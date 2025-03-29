@@ -245,6 +245,27 @@ jobs:
           
       - name: Create IAM OIDC Provider if needed
         run: |
+          # Installer eksctl plus sûrement
+          echo "Début de l'installation d'eksctl..."
+          EKSCTL_TEMP_DIR=$(mktemp -d)
+          curl --silent --location --show-error "https://github.com/weaveworks/eksctl/releases/latest/download/eksctl_$(uname -s)_amd64.tar.gz" | tar xz -C "$EKSCTL_TEMP_DIR"
+          ls -la "$EKSCTL_TEMP_DIR"
+          sudo cp "$EKSCTL_TEMP_DIR/eksctl" /usr/local/bin/
+          sudo chmod +x /usr/local/bin/eksctl
+          rm -rf "$EKSCTL_TEMP_DIR"
+          
+          # Vérification après installation
+          if ! command -v eksctl &> /dev/null; then
+            echo "ERREUR CRITIQUE: Impossible d'installer eksctl"
+            echo "PATH: $PATH"
+            echo "Contenu de /usr/local/bin:"
+            ls -la /usr/local/bin/
+            exit 1
+          fi
+          
+          echo "eksctl installé avec succès:"
+          eksctl version
+          
           # Vérifier si le fournisseur OIDC existe déjà
           OIDC_ID=$(aws eks describe-cluster --name digital-store-cluster --query "cluster.identity.oidc.issuer" --output text | sed -e 's|^https://||')
           PROVIDER_EXISTS=$(aws iam list-open-id-connect-providers | grep $OIDC_ID || echo "")
@@ -261,10 +282,38 @@ jobs:
           
       - name: Install AWS Load Balancer Controller
         run: |
-          # Installer eksctl
-          curl --silent --location "https://github.com/weaveworks/eksctl/releases/latest/download/eksctl_$(uname -s)_amd64.tar.gz" | tar xz -C /tmp
-          sudo mv /tmp/eksctl /usr/local/bin
+          # Vérifier si eksctl est déjà installé
+          if ! command -v eksctl &> /dev/null; then
+            echo "eksctl n'est pas trouvé, installation en cours..."
+            EKSCTL_TEMP_DIR=$(mktemp -d)
+            curl --silent --location --show-error "https://github.com/weaveworks/eksctl/releases/latest/download/eksctl_$(uname -s)_amd64.tar.gz" | tar xz -C "$EKSCTL_TEMP_DIR"
+            sudo cp "$EKSCTL_TEMP_DIR/eksctl" /usr/local/bin/
+            sudo chmod +x /usr/local/bin/eksctl
+            rm -rf "$EKSCTL_TEMP_DIR"
+          fi
+          echo "Version eksctl:"
           eksctl version
+          
+          # Installer Helm simplement
+          if ! command -v helm &> /dev/null; then
+            echo "Installation de Helm..."
+            curl -fsSL --retry 3 -o get_helm.sh https://raw.githubusercontent.com/helm/helm/main/scripts/get-helm-3
+            chmod +x get_helm.sh
+            ./get_helm.sh
+          fi
+          echo "Version Helm:"
+          helm version
+          
+          # Installer kubectl simplement
+          if ! command -v kubectl &> /dev/null; then
+            echo "Installation de kubectl..."
+            KUBE_VERSION=$(curl -L -s https://dl.k8s.io/release/stable.txt)
+            curl -LO --retry 3 "https://dl.k8s.io/release/${KUBE_VERSION}/bin/linux/amd64/kubectl"
+            chmod +x kubectl
+            sudo mv kubectl /usr/local/bin/
+          fi
+          echo "Version kubectl:"
+          kubectl version --client
           
           # Installer jq si non présent
           if ! command -v jq &> /dev/null; then
@@ -426,12 +475,39 @@ jobs:
           aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
           aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
           aws-region: ${{ env.AWS_REGION }}
-      - name: Install kubectl
+      - name: Install utilities (kubectl, helm, eksctl)
         run: |
-          curl -LO "https://dl.k8s.io/release/$(curl -L -s https://dl.k8s.io/release/stable.txt)/bin/linux/amd64/kubectl"
+          # Installer kubectl
+          echo "Installation de kubectl..."
+          KUBE_VERSION=$(curl -L -s https://dl.k8s.io/release/stable.txt)
+          curl -LO --retry 3 "https://dl.k8s.io/release/${KUBE_VERSION}/bin/linux/amd64/kubectl"
           chmod +x kubectl
           sudo mv kubectl /usr/local/bin/
           kubectl version --client
+          
+          # Installer helm si nécessaire
+          if ! command -v helm &> /dev/null; then
+            echo "Installation de Helm..."
+            curl -fsSL --retry 3 -o get_helm.sh https://raw.githubusercontent.com/helm/helm/main/scripts/get-helm-3
+            chmod +x get_helm.sh
+            ./get_helm.sh
+            helm version
+          fi
+          
+          # Installer eksctl si nécessaire
+          if ! command -v eksctl &> /dev/null; then
+            echo "Installation d'eksctl..."
+            curl --silent --location --show-error "https://github.com/weaveworks/eksctl/releases/latest/download/eksctl_$(uname -s)_amd64.tar.gz" | tar xz -C /tmp
+            sudo mv /tmp/eksctl /usr/local/bin/
+            sudo chmod +x /usr/local/bin/eksctl
+            eksctl version
+          fi
+          
+          # Installer jq si nécessaire
+          if ! command -v jq &> /dev/null; then
+            echo "Installation de jq..."
+            sudo apt-get update && sudo apt-get install -y jq
+          fi
       - name: Check EKS Cluster Status
         run: |
           CLUSTER_STATUS=$(aws eks describe-cluster --name ${{ env.EKS_CLUSTER_NAME }} --query 'cluster.status' --output text)
