@@ -227,45 +227,52 @@ jobs:
           aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
           aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
           aws-region: us-east-1
-      - name: Install Helm
+      - name: Install Required Tools
         run: |
-          curl -fsSL -o get_helm.sh https://raw.githubusercontent.com/helm/helm/main/scripts/get-helm-3
-          chmod +x get_helm.sh
-          ./get_helm.sh
-          helm version
-      - name: Install kubectl
-        run: |
-          curl -LO "https://dl.k8s.io/release/$(curl -L -s https://dl.k8s.io/release/stable.txt)/bin/linux/amd64/kubectl"
-          chmod +x kubectl
-          sudo mv kubectl /usr/local/bin/
+          # Installer kubectl
+          if ! command -v kubectl &> /dev/null; then
+            echo "Installation de kubectl..."
+            KUBE_VERSION=$(curl -L -s https://dl.k8s.io/release/stable.txt)
+            curl -LO --retry 3 "https://dl.k8s.io/release/${KUBE_VERSION}/bin/linux/amd64/kubectl"
+            chmod +x kubectl
+            sudo mv kubectl /usr/local/bin/
+          fi
+          echo "Version kubectl:"
           kubectl version --client
+          
+          # Installer Helm
+          if ! command -v helm &> /dev/null; then
+            echo "Installation de Helm..."
+            curl -fsSL --retry 3 -o get_helm.sh https://raw.githubusercontent.com/helm/helm/main/scripts/get-helm-3
+            chmod +x get_helm.sh
+            ./get_helm.sh
+          fi
+          echo "Version Helm:"
+          helm version
+          
+          # Installer eksctl
+          if ! command -v eksctl &> /dev/null; then
+            echo "Installation d'eksctl..."
+            EKSCTL_TEMP_DIR=$(mktemp -d)
+            curl --silent --location --show-error "https://github.com/weaveworks/eksctl/releases/latest/download/eksctl_$(uname -s)_amd64.tar.gz" | tar xz -C "$EKSCTL_TEMP_DIR"
+            sudo cp "$EKSCTL_TEMP_DIR/eksctl" /usr/local/bin/
+            sudo chmod +x /usr/local/bin/eksctl
+            rm -rf "$EKSCTL_TEMP_DIR"
+          fi
+          echo "Version eksctl:"
+          eksctl version
+          
+          # Installer jq si non présent
+          if ! command -v jq &> /dev/null; then
+            echo "Installation de jq..."
+            sudo apt-get update && sudo apt-get install -y jq
+          fi
       - name: Update kubeconfig
         run: |
           aws eks update-kubeconfig --name digital-store-cluster --region us-east-1
           
       - name: Create IAM OIDC Provider if needed
         run: |
-          # Installer eksctl plus sûrement
-          echo "Début de l'installation d'eksctl..."
-          EKSCTL_TEMP_DIR=$(mktemp -d)
-          curl --silent --location --show-error "https://github.com/weaveworks/eksctl/releases/latest/download/eksctl_$(uname -s)_amd64.tar.gz" | tar xz -C "$EKSCTL_TEMP_DIR"
-          ls -la "$EKSCTL_TEMP_DIR"
-          sudo cp "$EKSCTL_TEMP_DIR/eksctl" /usr/local/bin/
-          sudo chmod +x /usr/local/bin/eksctl
-          rm -rf "$EKSCTL_TEMP_DIR"
-          
-          # Vérification après installation
-          if ! command -v eksctl &> /dev/null; then
-            echo "ERREUR CRITIQUE: Impossible d'installer eksctl"
-            echo "PATH: $PATH"
-            echo "Contenu de /usr/local/bin:"
-            ls -la /usr/local/bin/
-            exit 1
-          fi
-          
-          echo "eksctl installé avec succès:"
-          eksctl version
-          
           # Vérifier si le fournisseur OIDC existe déjà
           OIDC_ID=$(aws eks describe-cluster --name digital-store-cluster --query "cluster.identity.oidc.issuer" --output text | sed -e 's|^https://||')
           PROVIDER_EXISTS=$(aws iam list-open-id-connect-providers | grep $OIDC_ID || echo "")
@@ -282,45 +289,6 @@ jobs:
           
       - name: Install AWS Load Balancer Controller
         run: |
-          # Vérifier si eksctl est déjà installé
-          if ! command -v eksctl &> /dev/null; then
-            echo "eksctl n'est pas trouvé, installation en cours..."
-            EKSCTL_TEMP_DIR=$(mktemp -d)
-            curl --silent --location --show-error "https://github.com/weaveworks/eksctl/releases/latest/download/eksctl_$(uname -s)_amd64.tar.gz" | tar xz -C "$EKSCTL_TEMP_DIR"
-            sudo cp "$EKSCTL_TEMP_DIR/eksctl" /usr/local/bin/
-            sudo chmod +x /usr/local/bin/eksctl
-            rm -rf "$EKSCTL_TEMP_DIR"
-          fi
-          echo "Version eksctl:"
-          eksctl version
-          
-          # Installer Helm simplement
-          if ! command -v helm &> /dev/null; then
-            echo "Installation de Helm..."
-            curl -fsSL --retry 3 -o get_helm.sh https://raw.githubusercontent.com/helm/helm/main/scripts/get-helm-3
-            chmod +x get_helm.sh
-            ./get_helm.sh
-          fi
-          echo "Version Helm:"
-          helm version
-          
-          # Installer kubectl simplement
-          if ! command -v kubectl &> /dev/null; then
-            echo "Installation de kubectl..."
-            KUBE_VERSION=$(curl -L -s https://dl.k8s.io/release/stable.txt)
-            curl -LO --retry 3 "https://dl.k8s.io/release/${KUBE_VERSION}/bin/linux/amd64/kubectl"
-            chmod +x kubectl
-            sudo mv kubectl /usr/local/bin/
-          fi
-          echo "Version kubectl:"
-          kubectl version --client
-          
-          # Installer jq si non présent
-          if ! command -v jq &> /dev/null; then
-            echo "Installing jq..."
-            sudo apt-get update && sudo apt-get install -y jq
-          fi
-          
           # Vérifier l'existence du fichier de politique
           if [ ! -f "scripts/alb-controller-policy.json" ]; then
             echo "Error: ALB controller policy file not found at scripts/alb-controller-policy.json"
@@ -403,13 +371,20 @@ jobs:
         run: |
           # Récupérer le mot de passe de la base de données depuis SSM
           DB_PASSWORD=$(aws ssm get-parameter --name "/terraform/db_password" --with-decryption --query "Parameter.Value" --output text)
-          # Exporter la variable pour Terraform
-          echo "TF_VAR_db_password=$DB_PASSWORD" >> $GITHUB_ENV
           
+          if [ -z "$DB_PASSWORD" ]; then
+            echo "Erreur: Impossible de récupérer le mot de passe depuis SSM"
+            exit 1
+          fi
+          
+          echo "Mot de passe récupéré avec succès depuis SSM"
+          
+          # Passer directement le mot de passe à la commande terraform
           cd terraform
           terraform apply -var deploy_app=true \
             -var backend_image="$ECR_REGISTRY/$ECR_REPOSITORY_BACKEND:$IMAGE_TAG" \
             -var frontend_image="$ECR_REGISTRY/$ECR_REPOSITORY_FRONTEND:$IMAGE_TAG" \
+            -var "db_password=$DB_PASSWORD" \
             -auto-approve
           
           # Attendre que Terraform termine complètement ses opérations
