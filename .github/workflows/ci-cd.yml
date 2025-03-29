@@ -379,49 +379,56 @@ jobs:
           
           echo "Mot de passe récupéré avec succès depuis SSM"
           
-          # Créer un répertoire isolé pour l'exécution Terraform temporaire
-          echo "Création d'un répertoire isolé pour le déploiement Terraform..."
-          TEMP_TF_DIR=$(mktemp -d)
-          echo "Répertoire temporaire créé: $TEMP_TF_DIR"
+          # Mise à jour kubeconfig pour la vérification initiale
+          echo "Configuration de l'accès au cluster EKS..."
+          aws eks update-kubeconfig --name digital-store-cluster --region us-east-1
           
-          # Vérifier que le répertoire a bien été créé
-          if [ ! -d "$TEMP_TF_DIR" ]; then
-            echo "Erreur: Impossible de créer le répertoire temporaire"
+          # Nettoyer les déploiements existants potentiellement bloqués
+          echo "Nettoyage des déploiements existants..."
+          helm uninstall digital-store -n default --wait || true
+          kubectl delete deployment,service,ingress -l app=digital-store -n default --grace-period=0 --force --ignore-not-found=true
+          kubectl delete pods -l app=digital-store -n default --grace-period=0 --force --ignore-not-found=true
+          echo "Attente de la suppression complète des ressources..."
+          sleep 30
+          
+          # Vérification et préparation du cluster
+          echo "Vérification du cluster EKS..."
+          NODE_COUNT=$(kubectl get nodes --no-headers | grep -c "Ready" || echo "0")
+          if [ "$NODE_COUNT" -eq 0 ]; then
+            echo "Erreur: Aucun nœud prêt dans le cluster EKS"
+            kubectl get nodes
             exit 1
           fi
           
-          # Vérifier que le chart Helm existe
-          if [ ! -d "${GITHUB_WORKSPACE}/terraform/chart" ]; then
-            echo "Erreur: Chart Helm introuvable à ${GITHUB_WORKSPACE}/terraform/chart"
-            echo "Contenu du répertoire terraform:"
-            ls -la ${GITHUB_WORKSPACE}/terraform/
-            exit 1
-          fi
+          echo "Vérification des quotas de ressources..."
+          kubectl describe nodes | grep -A 8 "Allocated resources"
           
-          # Obtenir les informations essentielles du cluster EKS et RDS
-          echo "Récupération des informations du cluster EKS..."
-          EKS_ENDPOINT=$(aws eks describe-cluster --name digital-store-cluster --query "cluster.endpoint" --output text)
-          if [ -z "$EKS_ENDPOINT" ]; then
-            echo "Erreur: Impossible de récupérer l'endpoint du cluster EKS"
-            exit 1
-          fi
-          
-          EKS_CA_DATA=$(aws eks describe-cluster --name digital-store-cluster --query "cluster.certificateAuthority.data" --output text)
-          VPC_ID=$(aws eks describe-cluster --name digital-store-cluster --query "cluster.resourcesVpcConfig.vpcId" --output text)
-          
+          # Obtenir les informations RDS
           echo "Récupération des informations RDS..."
           RDS_ENDPOINT=$(aws rds describe-db-instances --db-instance-identifier digital-store-db --query "DBInstances[0].Endpoint.Address" --output text || echo "")
           DB_NAME=$(aws rds describe-db-instances --db-instance-identifier digital-store-db --query "DBInstances[0].DBName" --output text || echo "digitalstore")
           DB_USERNAME=$(aws rds describe-db-instances --db-instance-identifier digital-store-db --query "DBInstances[0].MasterUsername" --output text || echo "devops")
           
-          # Vérifier les variables essentielles
           if [ -z "$RDS_ENDPOINT" ]; then
-            echo "Avertissement: Endpoint RDS non trouvé, le déploiement pourrait échouer"
+            echo "Erreur: Impossible de récupérer l'endpoint RDS"
+            exit 1
           fi
           
-          # Créer le fichier Kubernetes secret pour RDS
-          mkdir -p $TEMP_TF_DIR/k8s/database
-          cat > $TEMP_TF_DIR/k8s/database/rds-secret.yaml << EOF
+          # Tester la connectivité RDS
+          echo "Test de connectivité à la base de données RDS..."
+          if nc -zv $RDS_ENDPOINT 5432 -w 5; then
+            echo "Connectivité à la base de données RDS confirmée"
+          else
+            echo "Avertissement: Impossible de se connecter à la base de données RDS"
+          fi
+          
+          # Vérifier l'accès aux images ECR
+          echo "Vérification de l'accès aux images ECR..."
+          aws ecr describe-repositories --repository-names ${ECR_REPOSITORY_BACKEND} ${ECR_REPOSITORY_FRONTEND} || echo "Erreur: Impossible d'accéder aux repositories ECR"
+          
+          # Créer ou mettre à jour le secret pour RDS
+          echo "Création du secret RDS..."
+          cat <<EOF | kubectl apply -f -
           apiVersion: v1
           kind: Secret
           metadata:
@@ -439,163 +446,58 @@ jobs:
             DB_PASSWORD: "${DB_PASSWORD}"
           EOF
           
-          # Création du fichier Terraform temporaire
-          cat > $TEMP_TF_DIR/main.tf << EOF
-          terraform {
-            required_providers {
-              helm = {
-                source  = "hashicorp/helm"
-                version = "~> 2.9.0"
-              }
-              kubernetes = {
-                source  = "hashicorp/kubernetes"
-                version = "~> 2.20.0"
-              }
-            }
-          }
-          
-          provider "helm" {
-            kubernetes {
-              host                   = "${EKS_ENDPOINT}"
-              cluster_ca_certificate = base64decode("${EKS_CA_DATA}")
-              exec {
-                api_version = "client.authentication.k8s.io/v1beta1"
-                args        = ["eks", "get-token", "--cluster-name", "digital-store-cluster"]
-                command     = "aws"
-              }
-            }
-          }
-          
-          provider "kubernetes" {
-            host                   = "${EKS_ENDPOINT}"
-            cluster_ca_certificate = base64decode("${EKS_CA_DATA}")
-            exec {
-              api_version = "client.authentication.k8s.io/v1beta1"
-              args        = ["eks", "get-token", "--cluster-name", "digital-store-cluster"]
-              command     = "aws"
-            }
-          }
-          
-          resource "helm_release" "digital_store" {
-            name             = "digital-store"
-            namespace        = "default"
-            chart            = "${GITHUB_WORKSPACE}/terraform/chart"
-            timeout          = 600
-            atomic           = true
-            cleanup_on_fail  = true
-            
-            set {
-              name  = "backend.image.repository"
-              value = "${ECR_REGISTRY}/${ECR_REPOSITORY_BACKEND}"
-            }
-            
-            set {
-              name  = "backend.image.tag"
-              value = "${IMAGE_TAG}"
-            }
-            
-            set {
-              name  = "frontend.image.repository"
-              value = "${ECR_REGISTRY}/${ECR_REPOSITORY_FRONTEND}"
-            }
-            
-            set {
-              name  = "frontend.image.tag"
-              value = "${IMAGE_TAG}"
-            }
-            
-            set {
-              name  = "secrets.rds.host"
-              value = "${RDS_ENDPOINT}"
-            }
-            
-            set {
-              name  = "secrets.rds.username"
-              value = "${DB_USERNAME}"
-            }
-            
-            set {
-              name  = "secrets.rds.dbname"
-              value = "${DB_NAME}"
-            }
-            
-            set {
-              name  = "secrets.rds.password"
-              value = "${DB_PASSWORD}"
-            }
-          }
-          EOF
-          
-          # Initialiser et appliquer Terraform dans le répertoire isolé
-          cd $TEMP_TF_DIR
-          echo "Initialisation de Terraform dans le répertoire isolé..."
-          terraform init
-          
-          echo "Application de la configuration Terraform isolée..."
-          terraform apply -auto-approve
-          
-          TERRAFORM_STATUS=$?
-          
-          # Si Terraform a échoué, essayer le déploiement direct via Helm
-          if [ $TERRAFORM_STATUS -ne 0 ]; then
-            echo "Déploiement via Terraform échoué (code: $TERRAFORM_STATUS), tentative avec Helm direct..."
-            
-            # Mettre à jour kubeconfig pour accéder au cluster
-            aws eks update-kubeconfig --name digital-store-cluster --region us-east-1
-            
-            # Copier le chart Helm dans le répertoire temporaire
-            mkdir -p $TEMP_TF_DIR/chart
-            cp -R ${GITHUB_WORKSPACE}/terraform/chart/* $TEMP_TF_DIR/chart/
-            
-            # Appliquer d'abord le secret RDS
-            echo "Application du secret RDS..."
-            kubectl apply -f $TEMP_TF_DIR/k8s/database/rds-secret.yaml
-            
-            # Déployer avec Helm
-            echo "Déploiement avec Helm direct..."
-            
-            # Vérifier si le chart est déjà déployé
-            if helm ls -n default | grep -q "digital-store"; then
-              echo "Chart Helm existant trouvé, mise à jour..."
-              helm upgrade digital-store $TEMP_TF_DIR/chart \
-                --set backend.image.repository="${ECR_REGISTRY}/${ECR_REPOSITORY_BACKEND}" \
-                --set backend.image.tag="${IMAGE_TAG}" \
-                --set frontend.image.repository="${ECR_REGISTRY}/${ECR_REPOSITORY_FRONTEND}" \
-                --set frontend.image.tag="${IMAGE_TAG}" \
-                --set secrets.rds.host="${RDS_ENDPOINT}" \
-                --set secrets.rds.password="${DB_PASSWORD}" \
-                --set secrets.rds.username="${DB_USERNAME}" \
-                --set secrets.rds.dbname="${DB_NAME}" \
-                --wait
-            else
-              echo "Aucun chart Helm trouvé, installation..."
-              helm install digital-store $TEMP_TF_DIR/chart \
-                --set backend.image.repository="${ECR_REGISTRY}/${ECR_REPOSITORY_BACKEND}" \
-                --set backend.image.tag="${IMAGE_TAG}" \
-                --set frontend.image.repository="${ECR_REGISTRY}/${ECR_REPOSITORY_FRONTEND}" \
-                --set frontend.image.tag="${IMAGE_TAG}" \
-                --set secrets.rds.host="${RDS_ENDPOINT}" \
-                --set secrets.rds.password="${DB_PASSWORD}" \
-                --set secrets.rds.username="${DB_USERNAME}" \
-                --set secrets.rds.dbname="${DB_NAME}" \
-                --wait
-            fi
+          # Vérifier que le chart Helm existe
+          if [ ! -d "terraform/chart" ]; then
+            echo "Erreur: Chart Helm introuvable"
+            ls -la terraform/
+            exit 1
           fi
           
-          # Création de manifests Kubernetes directs comme dernier recours
-          if ! helm ls -n default | grep -q "digital-store"; then
-            echo "Déploiement via Helm échoué, tentative de déploiement direct avec kubectl..."
+          # Déploiement avec Helm
+          echo "Déploiement de l'application avec Helm..."
+          helm upgrade --install digital-store terraform/chart \
+            --namespace default \
+            --create-namespace \
+            --wait \
+            --timeout 15m \
+            --set backend.image.repository="${ECR_REGISTRY}/${ECR_REPOSITORY_BACKEND}" \
+            --set backend.image.tag="${IMAGE_TAG}" \
+            --set frontend.image.repository="${ECR_REGISTRY}/${ECR_REPOSITORY_FRONTEND}" \
+            --set frontend.image.tag="${IMAGE_TAG}" \
+            --set secrets.rds.host="${RDS_ENDPOINT}" \
+            --set secrets.rds.password="${DB_PASSWORD}" \
+            --set secrets.rds.username="${DB_USERNAME}" \
+            --set secrets.rds.dbname="${DB_NAME}" \
+            --set backend.resources.requests.memory="128Mi" \
+            --set backend.resources.requests.cpu="100m" \
+            --set frontend.resources.requests.memory="64Mi" \
+            --set frontend.resources.requests.cpu="50m"
+          
+          HELM_STATUS=$?
+          
+          # Si Helm échoue, déployer manuellement
+          if [ $HELM_STATUS -ne 0 ]; then
+            echo "Déploiement Helm échoué. Déploiement manuel avec kubectl..."
             
-            # Nettoyer les ressources existantes potentiellement conflictuelles
-            echo "Nettoyage des ressources existantes..."
-            kubectl delete deployment,service,ingress -l app=digital-store --ignore-not-found=true -n default
-            sleep 20
+            # Configmap
+            echo "Création du ConfigMap..."
+            cat <<EOF | kubectl apply -f -
+          apiVersion: v1
+          kind: ConfigMap
+          metadata:
+            name: digital-store-config
+            namespace: default
+            labels:
+              app: digital-store
+          data:
+            app.env: "production"
+            app.debug: "false"
+            app.api.url: "/api"
+          EOF
             
-            # Créer les répertoires pour les manifests
-            mkdir -p $TEMP_TF_DIR/k8s/{backend,frontend,ingress}
-            
-            # Manifests Backend
-            cat > $TEMP_TF_DIR/k8s/backend/deployment.yaml << EOF
+            # Backend Deployment
+            echo "Déploiement du backend..."
+            cat <<EOF | kubectl apply -f -
           apiVersion: apps/v1
           kind: Deployment
           metadata:
@@ -605,7 +507,7 @@ jobs:
               app: digital-store
               tier: backend
           spec:
-            replicas: 2
+            replicas: 1
             selector:
               matchLabels:
                 app: digital-store
@@ -619,11 +521,19 @@ jobs:
                 containers:
                 - name: backend
                   image: ${ECR_REGISTRY}/${ECR_REPOSITORY_BACKEND}:${IMAGE_TAG}
+                  imagePullPolicy: Always
                   ports:
                   - containerPort: 8080
+                  resources:
+                    requests:
+                      memory: "128Mi"
+                      cpu: "100m"
+                    limits:
+                      memory: "256Mi"
+                      cpu: "200m"
                   env:
                   - name: SPRING_DATASOURCE_URL
-                    value: "jdbc:postgresql://$(DB_HOST):5432/$(DB_NAME)"
+                    value: "jdbc:postgresql://${RDS_ENDPOINT}:5432/${DB_NAME}"
                   - name: SPRING_DATASOURCE_USERNAME
                     valueFrom:
                       secretKeyRef:
@@ -634,19 +544,25 @@ jobs:
                       secretKeyRef:
                         name: rds-credentials
                         key: DB_PASSWORD
-                  - name: DB_HOST
-                    valueFrom:
-                      secretKeyRef:
-                        name: rds-credentials
-                        key: DB_HOST
-                  - name: DB_NAME
-                    valueFrom:
-                      secretKeyRef:
-                        name: rds-credentials
-                        key: DB_NAME
+                  readinessProbe:
+                    httpGet:
+                      path: /actuator/health
+                      port: 8080
+                    initialDelaySeconds: 30
+                    periodSeconds: 10
+                    timeoutSeconds: 5
+                  livenessProbe:
+                    httpGet:
+                      path: /actuator/health
+                      port: 8080
+                    initialDelaySeconds: 60
+                    periodSeconds: 20
+                    timeoutSeconds: 5
           EOF
             
-            cat > $TEMP_TF_DIR/k8s/backend/service.yaml << EOF
+            # Backend Service
+            echo "Création du service backend..."
+            cat <<EOF | kubectl apply -f -
           apiVersion: v1
           kind: Service
           metadata:
@@ -665,8 +581,9 @@ jobs:
             type: ClusterIP
           EOF
             
-            # Manifests Frontend
-            cat > $TEMP_TF_DIR/k8s/frontend/deployment.yaml << EOF
+            # Frontend Deployment
+            echo "Déploiement du frontend..."
+            cat <<EOF | kubectl apply -f -
           apiVersion: apps/v1
           kind: Deployment
           metadata:
@@ -676,7 +593,7 @@ jobs:
               app: digital-store
               tier: frontend
           spec:
-            replicas: 2
+            replicas: 1
             selector:
               matchLabels:
                 app: digital-store
@@ -690,14 +607,38 @@ jobs:
                 containers:
                 - name: frontend
                   image: ${ECR_REGISTRY}/${ECR_REPOSITORY_FRONTEND}:${IMAGE_TAG}
+                  imagePullPolicy: Always
                   ports:
                   - containerPort: 80
+                  resources:
+                    requests:
+                      memory: "64Mi"
+                      cpu: "50m"
+                    limits:
+                      memory: "128Mi"
+                      cpu: "100m"
                   env:
                   - name: BACKEND_URL
                     value: "http://digital-store-backend"
+                  readinessProbe:
+                    httpGet:
+                      path: /
+                      port: 80
+                    initialDelaySeconds: 10
+                    periodSeconds: 5
+                    timeoutSeconds: 2
+                  livenessProbe:
+                    httpGet:
+                      path: /
+                      port: 80
+                    initialDelaySeconds: 20
+                    periodSeconds: 10
+                    timeoutSeconds: 2
           EOF
             
-            cat > $TEMP_TF_DIR/k8s/frontend/service.yaml << EOF
+            # Frontend Service
+            echo "Création du service frontend..."
+            cat <<EOF | kubectl apply -f -
           apiVersion: v1
           kind: Service
           metadata:
@@ -716,8 +657,22 @@ jobs:
             type: ClusterIP
           EOF
             
-            # Manifest Ingress
-            cat > $TEMP_TF_DIR/k8s/ingress/ingress.yaml << EOF
+            # Ingress
+            echo "Création de l'Ingress..."
+            # Vérifier si l'IngressClass existe
+            if ! kubectl get ingressclass alb &>/dev/null; then
+              echo "Création de l'IngressClass..."
+              cat <<EOF | kubectl apply -f -
+          apiVersion: networking.k8s.io/v1
+          kind: IngressClass
+          metadata:
+            name: alb
+          spec:
+            controller: ingress.k8s.aws/alb
+          EOF
+            fi
+            
+            cat <<EOF | kubectl apply -f -
           apiVersion: networking.k8s.io/v1
           kind: Ingress
           metadata:
@@ -747,46 +702,23 @@ jobs:
                       port:
                         number: 80
           EOF
-            
-            # Appliquer les manifests
-            echo "Application des secrets RDS..."
-            kubectl apply -f $TEMP_TF_DIR/k8s/database/rds-secret.yaml
-            
-            echo "Application des deployments et services backend..."
-            kubectl apply -f $TEMP_TF_DIR/k8s/backend/
-            
-            echo "Application des deployments et services frontend..."
-            kubectl apply -f $TEMP_TF_DIR/k8s/frontend/
-            
-            echo "Application des ressources ingress..."
-            
-            # Vérifier et créer l'IngressClass si nécessaire
-            if ! kubectl get ingressclass alb &>/dev/null; then
-              echo "Création de l'IngressClass pour ALB..."
-              cat <<EOF | kubectl apply -f -
-          apiVersion: networking.k8s.io/v1
-          kind: IngressClass
-          metadata:
-            name: alb
-          spec:
-            controller: ingress.k8s.aws/alb
-          EOF
-            fi
-            
-            kubectl apply -f $TEMP_TF_DIR/k8s/ingress/ingress.yaml
           fi
           
           # Vérification du déploiement
-          echo "Vérification des déploiements..."
-          kubectl wait --for=condition=available --timeout=300s deployment/digital-store-backend deployment/digital-store-frontend -n default || true
+          echo "Vérification du déploiement..."
+          kubectl rollout status deployment/digital-store-backend -n default --timeout=5m || true
+          kubectl rollout status deployment/digital-store-frontend -n default --timeout=5m || true
+          
           echo "État des pods:"
-          kubectl get pods -n default
+          kubectl get pods -n default -o wide
           
-          # Nettoyage du répertoire temporaire
-          rm -rf $TEMP_TF_DIR
+          echo "Logs des pods backend:"
+          kubectl logs -l app=digital-store,tier=backend -n default --tail=50 || true
           
-          # Attendre que les ressources soient complètement provisionnées
-          echo "Waiting for resources to be fully provisioned..."
+          echo "Logs des pods frontend:"
+          kubectl logs -l app=digital-store,tier=frontend -n default --tail=50 || true
+          
+          echo "Déploiement terminé. Attente avant validation..."
           sleep 60
 
       - name: Fix AWS Load Balancer Controller
@@ -1014,7 +946,7 @@ jobs:
             SECRET_DB_USERNAME=$(kubectl get secret rds-credentials -n default -o jsonpath='{.data.DB_USERNAME}' | base64 --decode)
             
             if [ -z "$SECRET_DB_NAME" ] || [ -z "$SECRET_DB_USERNAME" ]; then
-              echo "::warning::Secret RDS incomplet, régénération..."
+              echo "::warning::Secret RDS incomplet, régénérer..."
               # Régénérer le secret si nécessaire
               kubectl delete secret rds-credentials -n default
               kubectl apply -f k8s/database/rds-secret.yaml
@@ -1313,4 +1245,54 @@ jobs:
           # On continue quand même, pour ne pas bloquer le pipeline
           echo "::warning::Health check failed but continuing pipeline"
           exit 0
+
+  print-app-url:
+    needs: validate-infra
+    runs-on: ubuntu-latest
+    steps:
+      - name: Configure AWS credentials
+        uses: aws-actions/configure-aws-credentials@v2
+        with:
+          aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
+          aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+          aws-region: ${{ env.AWS_REGION }}
+          
+      - name: Install kubectl
+        run: |
+          KUBE_VERSION=$(curl -L -s https://dl.k8s.io/release/stable.txt)
+          curl -LO --retry 3 "https://dl.k8s.io/release/${KUBE_VERSION}/bin/linux/amd64/kubectl"
+          chmod +x kubectl
+          sudo mv kubectl /usr/local/bin/
+          kubectl version --client
+          
+      - name: Get kubeconfig
+        run: |
+          aws eks update-kubeconfig --name digital-store-cluster --region ${{ env.AWS_REGION }}
+          
+      - name: Get and display application URL
+        run: |
+          echo "Récupération de l'URL de l'application..."
+          
+          # Méthode 1: Récupérer depuis l'ingress
+          ALB_HOST=$(kubectl get ingress digital-store-alb -n default -o jsonpath='{.status.loadBalancer.ingress[0].hostname}' 2>/dev/null || echo "")
+          
+          # Méthode 2: Si rien trouvé via ingress, chercher via AWS CLI
+          if [ -z "$ALB_HOST" ]; then
+            ALB_NAME=$(aws elbv2 describe-load-balancers --query 'LoadBalancers[?contains(DNSName, `digital-store`) || contains(LoadBalancerName, `digital-store`)].LoadBalancerName' --output text)
+            if [ -n "$ALB_NAME" ]; then
+              ALB_HOST=$(aws elbv2 describe-load-balancers --names "$ALB_NAME" --query 'LoadBalancers[0].DNSName' --output text)
+            fi
+          fi
+          
+          if [ -n "$ALB_HOST" ]; then
+            echo "::notice::Application disponible à l'adresse: http://$ALB_HOST"
+            echo "::notice::Frontend: http://$ALB_HOST"
+            echo "::notice::API/Backend: http://$ALB_HOST/api"
+            echo "::notice::Health check: http://$ALB_HOST/api/health"
+            
+            # Créer une sortie pour GitHub Actions
+            echo "app_url=http://$ALB_HOST" >> $GITHUB_OUTPUT
+          else
+            echo "::warning::Impossible de récupérer l'URL de l'application. Vérifiez la création de l'ALB dans la console AWS."
+          fi
 
