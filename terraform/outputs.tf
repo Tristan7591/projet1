@@ -57,3 +57,23 @@ output "kubeconfig_command" {
   description = "Command to configure kubectl"
   value       = "aws eks update-kubeconfig --name ${aws_eks_cluster.main.name} --region ${var.aws_region}"
 }
+
+output "rds_endpoint" {
+  description = "Endpoint complet de la base de données RDS"
+  value       = aws_db_instance.postgres.endpoint
+}
+
+output "vpc_id" {
+  description = "ID du VPC où sont déployées les ressources"
+  value       = aws_vpc.main.id
+}
+
+output "public_subnet_ids" {
+  description = "IDs des sous-réseaux publics"
+  value       = [for subnet in aws_subnet.public : subnet.id]
+}
+
+output "private_subnet_ids" {
+  description = "IDs des sous-réseaux privés"
+  value       = [for subnet in aws_subnet.private : subnet.id]
+}

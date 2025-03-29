@@ -27,7 +27,9 @@ resource "local_file" "k8s_frontend_service" {
 
 resource "local_file" "k8s_ingress" {
   content = templatefile("${path.module}/templates/ingress.tpl", {
-    public_subnets = join(",", var.public_subnet_ids)
+    app_name          = var.eks_cluster_name
+    environment       = var.environment
+    public_subnet_ids = join(",", [for subnet in aws_subnet.public : subnet.id])
   })
   filename = "../k8s/ingress/ingress.yaml"
 }
@@ -39,6 +41,8 @@ resource "local_file" "k8s_rds_secret" {
     # Password is managed by SSM and the prepare-rds-secret.sh script
     db_host     = base64encode(aws_db_instance.postgres.address)
     db_port     = base64encode("5432")
+    # JDBC URL construit à partir des variables
+    spring_datasource_url = base64encode("jdbc:postgresql://${aws_db_instance.postgres.address}:5432/${var.db_name}")
   })
   filename = "../k8s/database/rds-secret.yaml"
 }

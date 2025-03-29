@@ -24,6 +24,21 @@ resource "aws_iam_role" "alb_ingress_controller" {
     Environment = var.environment
     Project     = "digital-store"
   }
+
+  override_existing_serviceaccounts = true
+  service_account_namespace         = "kube-system"
+  service_account_name              = "aws-load-balancer-controller"
+  
+  # Référencer le nouveau VPC
+  vpc_id = aws_vpc.main.id
+  
+  # Utiliser les sous-réseaux publics pour les ALB
+  subnet_mapping = [
+    for i, subnet in aws_subnet.public : {
+      subnet_id     = subnet.id
+      allocation_id = aws_eip.nat[i].id
+    }
+  ]
 }
 
 resource "aws_iam_role_policy_attachment" "alb_ingress_controller_policy" {

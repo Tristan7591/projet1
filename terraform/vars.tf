@@ -99,6 +99,20 @@ variable "db_allocated_storage" {
   default     = 20  # Minimum requis pour PostgreSQL avec gp3
 }
 
+# Nouvelle variable pour le CIDR du VPC
+variable "vpc_cidr" {
+  description = "CIDR block pour le VPC"
+  type        = string
+  default     = "10.0.0.0/16"
+}
+
+# Nouvelle variable pour les zones de disponibilité
+variable "availability_zones" {
+  description = "Liste des zones de disponibilité à utiliser"
+  type        = list(string)
+  default     = ["us-east-1a", "us-east-1b"]
+}
+
 # Tags communs
 variable "tags" {
   description = "Common tags for all resources"

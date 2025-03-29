@@ -32,16 +32,18 @@ spec:
               cpu: {{ .Values.backend.resources.limits.cpu | default "200m" }}
           readinessProbe:
             httpGet:
-              path: /api/actuator/health
+              path: /api/health
               port: 8080
             initialDelaySeconds: 30
             periodSeconds: 10
+            timeoutSeconds: 5
           livenessProbe:
             httpGet:
               path: /api/actuator/health
               port: 8080
             initialDelaySeconds: 60
             periodSeconds: 20
+            timeoutSeconds: 5
           volumeMounts:
             - name: config-volume
               mountPath: /app/config

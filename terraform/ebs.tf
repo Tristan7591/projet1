@@ -1,50 +1,29 @@
-resource "aws_iam_role" "ebs_csi_driver" {
-  name = "ebs-csi-driver-role"
+module "irsa_ebs_csi" {
+  source  = "terraform-aws-modules/iam/aws//modules/iam-role-for-service-accounts-eks"
+  version = "5.3.1"
 
-  assume_role_policy = jsonencode({
-    Version = "2012-10-17"
-    Statement = [
-      {
-        Effect = "Allow"
-        Principal = {
-          Service = "ec2.amazonaws.com"
-        }
-        Action = "sts:AssumeRole"
-      }
-    ]
-  })
+  role_name = "AmazonEKS_EBS_CSI_DriverRole"
 
-  tags = {
-    Environment = var.environment
-    Project     = "digital-store"
+  attach_ebs_csi_policy = true
+
+  oidc_providers = {
+    main = {
+      provider_arn               = aws_iam_openid_connect_provider.oidc_provider.arn
+      namespace_service_accounts = ["kube-system:ebs-csi-controller-sa"]
+    }
   }
 }
 
-resource "aws_iam_role_policy_attachment" "ebs_csi_policy" {
-  policy_arn = "arn:aws:iam::aws:policy/service-role/AmazonEBSCSIDriverPolicy"
-  role       = aws_iam_role.ebs_csi_driver.name
-}
+resource "aws_eks_addon" "ebs_csi" {
+  cluster_name = aws_eks_cluster.main.name
+  addon_name   = "aws-ebs-csi-driver"
 
-resource "helm_release" "aws_ebs_csi_driver" {
-  name       = "aws-ebs-csi-driver"
-  namespace  = "kube-system"
-  repository = "https://kubernetes-sigs.github.io/aws-ebs-csi-driver"
-  chart      = "aws-ebs-csi-driver"
-  version    = "2.25.0"
-
-  set {
-    name  = "controller.serviceAccount.create"
-    value = "true"
-  }
-
-  set {
-    name  = "controller.serviceAccount.annotations.eks\\.amazonaws\\.com/role-arn"
-    value = aws_iam_role.ebs_csi_driver.arn
-  }
+  service_account_role_arn = module.irsa_ebs_csi.iam_role_arn
 
   depends_on = [
     aws_eks_cluster.main,
-    aws_iam_role_policy_attachment.ebs_csi_policy
+    module.irsa_ebs_csi,
+    aws_eks_node_group.main
   ]
 }
 
@@ -63,7 +42,7 @@ resource "kubernetes_storage_class" "ebs_sc" {
   }
 
   depends_on = [
-    helm_release.aws_ebs_csi_driver
+    aws_eks_addon.ebs_csi
   ]
 }
 

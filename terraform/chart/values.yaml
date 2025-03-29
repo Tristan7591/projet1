@@ -1,6 +1,8 @@
 appName: digital-store
+environment: production
 
 backend:
+  enabled: true  # Flag pour activer/désactiver le déploiement du backend
   replicas: 1
   image:
     repository: "797394900921.dkr.ecr.us-east-1.amazonaws.com/digital-store/backend"
@@ -14,6 +16,7 @@ backend:
       cpu: "200m"
 
 frontend:
+  enabled: true  # Flag pour activer/désactiver le déploiement du frontend
   replicas: 1
   image:
     repository: "797394900921.dkr.ecr.us-east-1.amazonaws.com/digital-store/frontend"
@@ -26,11 +29,18 @@ frontend:
       memory: "128Mi"
       cpu: "100m"
 
+# Configuration pour l'Ingress et les sous-réseaux
+ingress:
+  subnets: []  # Sera rempli dynamiquement lors du déploiement
+
 secrets:
   rds:
     name: rds-credentials
     # Ces valeurs sont des placeholders, écrasées lors du déploiement
     host: "placeholder-db-host"
     password: "placeholder-db-password"
+    username: "devops"
+    dbname: "digitalstore"
+    jdbc_url: "jdbc:postgresql://placeholder-db-host:5432/digitalstore"
 configMap:
   name: digital-store-config 

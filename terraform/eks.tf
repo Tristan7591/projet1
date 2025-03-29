@@ -4,7 +4,7 @@ resource "aws_eks_cluster" "main" {
   version  = "1.27"
 
   vpc_config {
-    subnet_ids              = local.private_subnet_ids
+    subnet_ids              = aws_subnet.private[*].id
     endpoint_private_access = true
     endpoint_public_access  = true
     security_group_ids      = [aws_security_group.eks_cluster.id]
@@ -25,7 +25,7 @@ resource "aws_eks_node_group" "main" {
   cluster_name    = aws_eks_cluster.main.name
   node_group_name = "digital-store-node-group"
   node_role_arn   = aws_iam_role.eks_node.arn
-  subnet_ids      = local.private_subnet_ids
+  subnet_ids      = aws_subnet.private[*].id
 
   scaling_config {
     desired_size = var.eks_node_group_desired_size
@@ -54,7 +54,7 @@ resource "aws_eks_node_group" "main" {
 resource "aws_security_group" "eks_cluster" {
   name        = "digital-store-eks-cluster"
   description = "Security group for EKS cluster"
-  vpc_id      = local.vpc_id
+  vpc_id      = aws_vpc.main.id
 
   egress {
     from_port   = 0

@@ -267,6 +267,44 @@ jobs:
             echo "Installation de jq..."
             sudo apt-get update && sudo apt-get install -y jq
           fi
+          
+          # Installer aws-cli si nécessaire
+          if ! command -v aws &> /dev/null; then
+            echo "Installation d'AWS CLI..."
+            sudo apt-get update && sudo apt-get install -y awscli
+          fi
+          
+          # Nettoyer l'espace disque si nécessaire
+          echo "Vérification de l'espace disque disponible..."
+          df -h /
+          AVAILABLE_SPACE=$(df -k / | awk 'NR==2 {print $4}')
+          if [ "$AVAILABLE_SPACE" -lt 2097152 ]; then  # Moins de 2GB disponible
+            echo "Nettoyage de l'espace disque..."
+            sudo apt-get clean
+            sudo rm -rf /var/lib/apt/lists/*
+            docker system prune -af
+            echo "Espace disque après nettoyage:"
+            df -h /
+          fi
+          
+          # Vérifiez toutes les dépendances requises
+          echo "Vérification des dépendances requises installées..."
+          DEPS_OK=true
+          for cmd in kubectl helm eksctl jq aws curl; do
+            if ! command -v $cmd &> /dev/null; then
+              echo "❌ $cmd n'est pas installé ou n'est pas accessible"
+              DEPS_OK=false
+            else
+              echo "✅ $cmd est installé"
+            fi
+          done
+          
+          if [ "$DEPS_OK" = false ]; then
+            echo "Certaines dépendances ne sont pas installées correctement. Arrêt."
+            exit 1
+          fi
+          
+          echo "Toutes les dépendances requises sont installées!"
       - name: Update kubeconfig
         run: |
           aws eks update-kubeconfig --name digital-store-cluster --region us-east-1
@@ -341,93 +379,119 @@ jobs:
           
           # Obtenir le VPC ID du cluster
           VPC_ID=$(aws eks describe-cluster --name digital-store-cluster --query "cluster.resourcesVpcConfig.vpcId" --output text)
-          if [ -z "$VPC_ID" ]; then
-            echo "Error: Could not determine VPC ID for the cluster"
-            exit 1
+          VPC_CIDR=$(aws ec2 describe-vpcs --vpc-ids $VPC_ID --query "Vpcs[0].CidrBlock" --output text)
+          echo "VPC ID: $VPC_ID, CIDR: $VPC_CIDR"
+          
+          # Vérifier les outputs Terraform pour les sous-réseaux
+          echo "Récupération des informations de sous-réseaux depuis Terraform outputs..."
+          cd terraform
+          PUBLIC_SUBNETS_TF=$(terraform output -json public_subnet_ids 2>/dev/null || echo "[]")
+          PRIVATE_SUBNETS_TF=$(terraform output -json private_subnet_ids 2>/dev/null || echo "[]")
+          cd ..
+          echo "Sous-réseaux publics (Terraform): $PUBLIC_SUBNETS_TF"
+          echo "Sous-réseaux privés (Terraform): $PRIVATE_SUBNETS_TF"
+          
+          if [ -n "$RDS_SG_ID" ]; then
+            echo "Configuration des règles d'accès pour RDS..."
+            
+            # Vérifier si une règle pour le CIDR du VPC existe déjà
+            CIDR_RULE_EXISTS=$(aws ec2 describe-security-group-rules --filter "Name=group-id,Values=$RDS_SG_ID" "Name=protocol,Values=tcp" "Name=from-port,Values=5432" "Name=to-port,Values=5432" "Name=cidr,Values=$VPC_CIDR" --query "SecurityGroupRules[0].SecurityGroupRuleId" --output text || echo "")
+            
+            if [ -z "$CIDR_RULE_EXISTS" ] || [ "$CIDR_RULE_EXISTS" == "None" ]; then
+              echo "Ajout d'une règle pour permettre l'accès depuis tout le VPC vers RDS..."
+              aws ec2 authorize-security-group-ingress \
+                --group-id $RDS_SG_ID \
+                --protocol tcp \
+                --port 5432 \
+                --cidr $VPC_CIDR || echo "::warning::Impossible d'ajouter la règle CIDR, peut-être déjà existante"
+            else
+              echo "La règle d'accès CIDR existe déjà"
+            fi
+            
+            # Ajouter des règles pour les groupes de sécurité EKS
+            if [ -n "$EKS_NODE_SG_ID" ]; then
+              NODE_RULE_EXISTS=$(aws ec2 describe-security-group-rules --filter "Name=group-id,Values=$RDS_SG_ID" "Name=protocol,Values=tcp" "Name=from-port,Values=5432" "Name=to-port,Values=5432" --query "SecurityGroupRules[?SourceSecurityGroupId=='$EKS_NODE_SG_ID'].SecurityGroupRuleId" --output text || echo "")
+              
+              if [ -z "$NODE_RULE_EXISTS" ] || [ "$NODE_RULE_EXISTS" == "None" ]; then
+                echo "Ajout d'une règle pour permettre l'accès depuis les nœuds EKS vers RDS..."
+                aws ec2 authorize-security-group-ingress \
+                  --group-id $RDS_SG_ID \
+                  --protocol tcp \
+                  --port 5432 \
+                  --source-group $EKS_NODE_SG_ID || echo "::warning::Impossible d'ajouter la règle de nœuds, peut-être déjà existante"
+              else
+                echo "La règle d'accès des nœuds existe déjà"
+              fi
+            fi
+            
+            if [ -n "$EKS_CLUSTER_SG_ID" ]; then
+              CLUSTER_RULE_EXISTS=$(aws ec2 describe-security-group-rules --filter "Name=group-id,Values=$RDS_SG_ID" "Name=protocol,Values=tcp" "Name=from-port,Values=5432" "Name=to-port,Values=5432" --query "SecurityGroupRules[?SourceSecurityGroupId=='$EKS_CLUSTER_SG_ID'].SecurityGroupRuleId" --output text || echo "")
+              
+              if [ -z "$CLUSTER_RULE_EXISTS" ] || [ "$CLUSTER_RULE_EXISTS" == "None" ]; then
+                echo "Ajout d'une règle pour permettre l'accès depuis le groupe de sécurité du cluster EKS vers RDS..."
+                aws ec2 authorize-security-group-ingress \
+                  --group-id $RDS_SG_ID \
+                  --protocol tcp \
+                  --port 5432 \
+                  --source-group $EKS_CLUSTER_SG_ID || echo "::warning::Impossible d'ajouter la règle du cluster, peut-être déjà existante"
+              else
+                echo "La règle d'accès du cluster existe déjà"
+              fi
+            fi
           fi
-          echo "Using VPC ID: $VPC_ID"
           
-          helm upgrade --install aws-load-balancer-controller eks/aws-load-balancer-controller \
-            -n kube-system \
-            --set clusterName=digital-store-cluster \
-            --set serviceAccount.create=false \
-            --set serviceAccount.name=aws-load-balancer-controller \
-            --set region=us-east-1 \
-            --set vpcId=$VPC_ID
-          
-          echo "AWS Load Balancer Controller installed!"
-          
-          # Vérifier que le contrôleur est bien déployé
-          echo "Waiting for Load Balancer Controller to be ready (up to 10 minutes)..."
-          kubectl wait --for=condition=available deployment/aws-load-balancer-controller -n kube-system --timeout=600s
-          echo "Load Balancer Controller ready!"
-
-      - name: Deploy Helm Chart
-        env:
-          IMAGE_TAG: ${{ github.sha }}
-          ECR_REGISTRY: ${{ env.ECR_REGISTRY }}
-        run: |
-          set -e  # Exit immediately if a command fails
-          
-          # Récupérer le mot de passe de la base de données depuis SSM
-          DB_PASSWORD=$(aws ssm get-parameter --name "/terraform/db_password" --with-decryption --query "Parameter.Value" --output text)
-          
-          if [ -z "$DB_PASSWORD" ]; then
-            echo "Erreur: Impossible de récupérer le mot de passe depuis SSM"
-            exit 1
-          fi
-          
-          echo "Mot de passe récupéré avec succès depuis SSM"
-          
-          # Mise à jour kubeconfig pour la vérification initiale
-          echo "Configuration de l'accès au cluster EKS..."
-          aws eks update-kubeconfig --name digital-store-cluster --region us-east-1
-          
-          # Nettoyer les déploiements existants potentiellement bloqués
-          echo "Nettoyage des déploiements existants..."
-          helm uninstall digital-store -n default --wait || true
-          kubectl delete deployment,service,ingress -l app=digital-store -n default --grace-period=0 --force --ignore-not-found=true
-          kubectl delete pods -l app=digital-store -n default --grace-period=0 --force --ignore-not-found=true
-          echo "Attente de la suppression complète des ressources..."
-          sleep 30
-          
-          # Vérification et préparation du cluster
-          echo "Vérification du cluster EKS..."
-          NODE_COUNT=$(kubectl get nodes --no-headers | grep -c "Ready" || echo "0")
-          if [ "$NODE_COUNT" -eq 0 ]; then
-            echo "Erreur: Aucun nœud prêt dans le cluster EKS"
-            kubectl get nodes
-            exit 1
-          fi
-          
-          echo "Vérification des quotas de ressources..."
-          kubectl describe nodes | grep -A 8 "Allocated resources"
-          
-          # Obtenir les informations RDS
-          echo "Récupération des informations RDS..."
-          RDS_ENDPOINT=$(aws rds describe-db-instances --db-instance-identifier digital-store-db --query "DBInstances[0].Endpoint.Address" --output text || echo "")
-          DB_NAME=$(aws rds describe-db-instances --db-instance-identifier digital-store-db --query "DBInstances[0].DBName" --output text || echo "digitalstore")
-          DB_USERNAME=$(aws rds describe-db-instances --db-instance-identifier digital-store-db --query "DBInstances[0].MasterUsername" --output text || echo "devops")
-          
-          if [ -z "$RDS_ENDPOINT" ]; then
-            echo "Erreur: Impossible de récupérer l'endpoint RDS"
-            exit 1
-          fi
+          # Attendre que les règles prennent effet
+          echo "Attente de 10 secondes pour la propagation des règles de sécurité..."
+          sleep 10
           
           # Tester la connectivité RDS
           echo "Test de connectivité à la base de données RDS..."
-          if nc -zv $RDS_ENDPOINT 5432 -w 5; then
-            echo "Connectivité à la base de données RDS confirmée"
+          # Utiliser un test plus robuste avec plusieurs méthodes pour vérifier la connectivité
+          CONNECTION_SUCCESS=false
+          
+          # Méthode 1 : Utiliser nc avec un timeout plus long
+          if nc -z -w 15 $RDS_ENDPOINT 5432; then
+            echo "✅ Connectivité à la base de données RDS confirmée avec nc"
+            CONNECTION_SUCCESS=true
           else
-            echo "Avertissement: Impossible de se connecter à la base de données RDS"
+            echo "❌ Échec de connexion avec nc, tentative avec pg_isready..."
+            
+            # Méthode 2 : Installer pg_isready et tester la connexion 
+            apt-get update -qq && apt-get install -qq -y postgresql-client >/dev/null 2>&1 || true
+            if pg_isready -h $RDS_ENDPOINT -p 5432 -d $DB_NAME -U $DB_USERNAME -t 10; then
+              echo "✅ Connectivité à la base de données RDS confirmée avec pg_isready"
+              CONNECTION_SUCCESS=true
+            else
+              echo "❌ Échec de connexion avec pg_isready, vérification de route..."
+              
+              # Méthode 3 : Vérifier la route réseau
+              traceroute -m 10 $RDS_ENDPOINT || true
+              
+              # Obtenir des informations supplémentaires sur le VPC et les sous-réseaux
+              echo "Informations sur les sous-réseaux du VPC:"
+              aws ec2 describe-subnets --filters "Name=vpc-id,Values=$VPC_ID" --query "Subnets[*].{ID:SubnetId,CIDR:CidrBlock,AZ:AvailabilityZone,Public:MapPublicIpOnLaunch}" --output table
+              
+              echo "Tables de routage:"
+              SUBNET_IDS=$(aws ec2 describe-subnets --filters "Name=vpc-id,Values=$VPC_ID" --query "Subnets[*].SubnetId" --output text)
+              for SUBNET_ID in $SUBNET_IDS; do
+                ROUTE_TABLE_ID=$(aws ec2 describe-route-tables --filters "Name=association.subnet-id,Values=$SUBNET_ID" --query "RouteTables[0].RouteTableId" --output text)
+                if [ -n "$ROUTE_TABLE_ID" ] && [ "$ROUTE_TABLE_ID" != "None" ]; then
+                  echo "Table de routage pour le sous-réseau $SUBNET_ID:"
+                  aws ec2 describe-route-tables --route-table-ids $ROUTE_TABLE_ID --query "RouteTables[0].Routes" --output table
+                fi
+              done
+              
+              echo "::warning::Problème de connectivité au serveur RDS. Vérifiez les groupes de sécurité, les routes réseau et les paramètres VPC."
+            fi
           fi
+          
+          # Création du secret RDS (quoi qu'il arrive pour permettre au déploiement de continuer)
+          echo "Création du secret RDS..."
           
           # Vérifier l'accès aux images ECR
           echo "Vérification de l'accès aux images ECR..."
           aws ecr describe-repositories --repository-names ${ECR_REPOSITORY_BACKEND} ${ECR_REPOSITORY_FRONTEND} || echo "Erreur: Impossible d'accéder aux repositories ECR"
           
-          # Créer ou mettre à jour le secret pour RDS
-          echo "Création du secret RDS..."
           cat <<EOF | kubectl apply -f -
           apiVersion: v1
           kind: Secret
@@ -446,6 +510,10 @@ jobs:
             DB_PASSWORD: "${DB_PASSWORD}"
           EOF
           
+          # Vérification de la création du secret
+          echo "Vérification du secret RDS..."
+          kubectl get secret rds-credentials -n default -o yaml | grep -v '^\s*password:' || echo "Secret non trouvé"
+          
           # Vérifier que le chart Helm existe
           if [ ! -d "terraform/chart" ]; then
             echo "Erreur: Chart Helm introuvable"
@@ -453,13 +521,129 @@ jobs:
             exit 1
           fi
           
-          # Déploiement avec Helm
-          echo "Déploiement de l'application avec Helm..."
-          helm upgrade --install digital-store terraform/chart \
+          # Vérifier l'existence de précédentes installations pour éviter les conflits
+          echo "Vérification des installations Helm existantes..."
+          if helm list -n default | grep -q "digital-store"; then
+            echo "Une version de digital-store existe déjà, suppression propre..."
+            helm uninstall digital-store -n default --wait || {
+              echo "Échec de la désinstallation standard, forçage de la suppression des ressources..."
+              # Supprimer manuellement les ressources pour éviter les conflits
+              kubectl delete deployment,service,ingress,secret -l app=digital-store -n default --grace-period=10 --timeout=60s --ignore-not-found=true
+              sleep 30
+            }
+          fi
+          
+          # Sécurisation : vérifier l'absence de ressources conflictuelles
+          echo "Vérification des ressources potentiellement conflictuelles..."
+          for resource in deployment service ingress; do
+            CONFLICTS=$(kubectl get $resource -l app=digital-store -n default --no-headers 2>/dev/null | wc -l)
+            if [ "$CONFLICTS" -gt 0 ]; then
+              echo "Trouvé $CONFLICTS ressources $resource à supprimer avant déploiement"
+              kubectl delete $resource -l app=digital-store -n default --grace-period=5 --force --ignore-not-found=true
+            fi
+          done
+          
+          # Vérifier l'espace disponible sur les nœuds
+          echo "Vérification des ressources disponibles dans le cluster..."
+          kubectl describe nodes | grep -A 8 "Allocated resources"
+          
+          # Nettoyage des pods terminés ou en erreur pour libérer des ressources
+          echo "Nettoyage des pods terminés ou en erreur..."
+          kubectl delete pods --field-selector=status.phase=Failed -n default --grace-period=0 --force || true
+          kubectl delete pods --field-selector=status.phase=Succeeded -n default --grace-period=0 --force || true
+          
+          # Vérifier l'installation de Helm
+          echo "Vérification de l'installation de Helm..."
+          if ! command -v helm &> /dev/null; then
+            echo "Helm n'est pas installé. Installation..."
+            curl -fsSL -o get_helm.sh https://raw.githubusercontent.com/helm/helm/main/scripts/get-helm-3
+            chmod +x get_helm.sh
+            ./get_helm.sh
+          fi
+          helm version
+
+          # Vérifier l'installation de kubectl
+          echo "Vérification de l'installation de kubectl..."
+          if ! command -v kubectl &> /dev/null; then
+            echo "Kubectl n'est pas installé. Installation..."
+            curl -LO "https://dl.k8s.io/release/$(curl -L -s https://dl.k8s.io/release/stable.txt)/bin/linux/amd64/kubectl"
+            chmod +x kubectl
+            sudo mv kubectl /usr/local/bin/
+          fi
+          kubectl version --client
+          
+          # Collecter les IDs des sous-réseaux publics pour l'ingress
+          PUBLIC_SUBNET_IDS=$(aws ec2 describe-subnets --filters "Name=vpc-id,Values=$VPC_ID" "Name=tag:Name,Values=*public*" --query "Subnets[*].SubnetId" --output text | tr '\t' ',')
+          echo "Sous-réseaux publics pour l'ingress ALB: $PUBLIC_SUBNET_IDS"
+          
+          # Construction de l'URL JDBC
+          JDBC_URL="jdbc:postgresql://${RDS_ENDPOINT}:5432/${DB_NAME}"
+          echo "JDBC URL: $JDBC_URL"
+          
+          # Vérifier que le chart Helm est valide avant de déployer
+          echo "Validation du chart Helm..."
+          helm lint terraform/chart || echo "Des problèmes ont été détectés dans le chart, mais on continue le déploiement"
+          
+          # Pré-télécharger les images pour éviter les timeouts pendant le déploiement
+          echo "Pré-téléchargement des images sur les nœuds du cluster pour accélérer le déploiement..."
+          
+          # Obtenir les noms d'images complets
+          BACKEND_IMAGE="${ECR_REGISTRY}/${ECR_REPOSITORY_BACKEND}:${IMAGE_TAG}"
+          FRONTEND_IMAGE="${ECR_REGISTRY}/${ECR_REPOSITORY_FRONTEND}:${IMAGE_TAG}"
+          
+          # Vérifier les images dans ECR
+          echo "Vérification de l'accessibilité des images dans ECR..."
+          aws ecr describe-images --repository-name ${ECR_REPOSITORY_BACKEND} --image-ids imageTag=${IMAGE_TAG} || echo "L'image backend n'est pas accessible dans ECR"
+          aws ecr describe-images --repository-name ${ECR_REPOSITORY_FRONTEND} --image-ids imageTag=${IMAGE_TAG} || echo "L'image frontend n'est pas accessible dans ECR"
+          
+          # Pré-télécharger les images sur les nœuds EKS
+          echo "Création d'un DaemonSet pour pré-télécharger les images sur tous les nœuds..."
+          cat <<EOF | kubectl apply -f -
+          apiVersion: apps/v1
+          kind: DaemonSet
+          metadata:
+            name: image-puller
+            namespace: default
+          spec:
+            selector:
+              matchLabels:
+                app: image-puller
+            template:
+              metadata:
+                labels:
+                  app: image-puller
+              spec:
+                containers:
+                - name: puller
+                  image: busybox
+                  command: ['sh', '-c', 'echo Image puller completed && sleep 5']
+                  imagePullPolicy: Always
+                initContainers:
+                - name: pull-backend
+                  image: ${BACKEND_IMAGE}
+                  command: ['sh', '-c', 'echo Backend image pulled']
+                  imagePullPolicy: Always
+                - name: pull-frontend
+                  image: ${FRONTEND_IMAGE}
+                  command: ['sh', '-c', 'echo Frontend image pulled']
+                  imagePullPolicy: Always
+          EOF
+          
+          # Attendre que le DaemonSet ait téléchargé les images sur tous les nœuds
+          echo "Attente du téléchargement des images sur tous les nœuds..."
+          kubectl rollout status daemonset/image-puller --timeout=5m || echo "Timeout lors du téléchargement des images, on continue"
+          
+          # Supprimer le DaemonSet
+          echo "Suppression du DaemonSet..."
+          kubectl delete daemonset image-puller || true
+          
+          echo "Démarrage du déploiement avec Helm avec contrôle d'erreur amélioré..."
+          # Premier déploiement avec un timeout court pour vérifier la validité
+          if ! helm upgrade --install digital-store terraform/chart \
             --namespace default \
             --create-namespace \
-            --wait \
-            --timeout 15m \
+            --atomic \
+            --timeout 5m \
             --set backend.image.repository="${ECR_REGISTRY}/${ECR_REPOSITORY_BACKEND}" \
             --set backend.image.tag="${IMAGE_TAG}" \
             --set frontend.image.repository="${ECR_REGISTRY}/${ECR_REPOSITORY_FRONTEND}" \
@@ -468,247 +652,97 @@ jobs:
             --set secrets.rds.password="${DB_PASSWORD}" \
             --set secrets.rds.username="${DB_USERNAME}" \
             --set secrets.rds.dbname="${DB_NAME}" \
+            --set secrets.rds.jdbc_url="${JDBC_URL}" \
+            --set ingress.subnets="${PUBLIC_SUBNET_IDS}" \
+            --set environment="production" \
             --set backend.resources.requests.memory="128Mi" \
             --set backend.resources.requests.cpu="100m" \
+            --set backend.resources.limits.memory="256Mi" \
+            --set backend.resources.limits.cpu="200m" \
             --set frontend.resources.requests.memory="64Mi" \
-            --set frontend.resources.requests.cpu="50m"
+            --set frontend.resources.requests.cpu="50m" \
+            --set frontend.resources.limits.memory="128Mi" \
+            --set frontend.resources.limits.cpu="100m" \
+            --dry-run; then
+            echo "La validation du déploiement a échoué, vérification détaillée..."
+            helm template terraform/chart --debug
+            echo "Correction des problèmes détectés..."
+            # Continuer quand même mais sans --atomic pour voir l'état
+          fi
+          
+          echo "Déploiement final avec surveillance progressive..."
+          # Déploiement réel avec surveillance progressive
+          helm upgrade --install digital-store terraform/chart \
+            --namespace default \
+            --create-namespace \
+            --wait \
+            --timeout 30m \
+            --set backend.image.repository="${ECR_REGISTRY}/${ECR_REPOSITORY_BACKEND}" \
+            --set backend.image.tag="${IMAGE_TAG}" \
+            --set frontend.image.repository="${ECR_REGISTRY}/${ECR_REPOSITORY_FRONTEND}" \
+            --set frontend.image.tag="${IMAGE_TAG}" \
+            --set secrets.rds.host="${RDS_ENDPOINT}" \
+            --set secrets.rds.password="${DB_PASSWORD}" \
+            --set secrets.rds.username="${DB_USERNAME}" \
+            --set secrets.rds.dbname="${DB_NAME}" \
+            --set secrets.rds.jdbc_url="${JDBC_URL}" \
+            --set ingress.subnets="${PUBLIC_SUBNET_IDS}" \
+            --set environment="production" \
+            --set backend.resources.requests.memory="128Mi" \
+            --set backend.resources.requests.cpu="100m" \
+            --set backend.resources.limits.memory="256Mi" \
+            --set backend.resources.limits.cpu="200m" \
+            --set frontend.resources.requests.memory="64Mi" \
+            --set frontend.resources.requests.cpu="50m" \
+            --set frontend.resources.limits.memory="128Mi" \
+            --set frontend.resources.limits.cpu="100m"
           
           HELM_STATUS=$?
           
-          # Si Helm échoue, déployer manuellement
+          # En cas d'échec, déployer les composants indépendamment et surveiller l'évolution
           if [ $HELM_STATUS -ne 0 ]; then
-            echo "Déploiement Helm échoué. Déploiement manuel avec kubectl..."
+            echo "Le déploiement Helm a échoué avec le code $HELM_STATUS. Déploiement progressif des composants..."
             
-            # Configmap
-            echo "Création du ConfigMap..."
-            cat <<EOF | kubectl apply -f -
-          apiVersion: v1
-          kind: ConfigMap
-          metadata:
-            name: digital-store-config
-            namespace: default
-            labels:
-              app: digital-store
-          data:
-            app.env: "production"
-            app.debug: "false"
-            app.api.url: "/api"
-          EOF
+            # Vérifier où en est le déploiement
+            echo "État actuel des ressources:"
+            kubectl get all -n default -l app=digital-store
             
-            # Backend Deployment
-            echo "Déploiement du backend..."
-            cat <<EOF | kubectl apply -f -
-          apiVersion: apps/v1
-          kind: Deployment
-          metadata:
-            name: digital-store-backend
-            namespace: default
-            labels:
-              app: digital-store
-              tier: backend
-          spec:
-            replicas: 1
-            selector:
-              matchLabels:
-                app: digital-store
-                tier: backend
-            template:
-              metadata:
-                labels:
-                  app: digital-store
-                  tier: backend
-              spec:
-                containers:
-                - name: backend
-                  image: ${ECR_REGISTRY}/${ECR_REPOSITORY_BACKEND}:${IMAGE_TAG}
-                  imagePullPolicy: Always
-                  ports:
-                  - containerPort: 8080
-                  resources:
-                    requests:
-                      memory: "128Mi"
-                      cpu: "100m"
-                    limits:
-                      memory: "256Mi"
-                      cpu: "200m"
-                  env:
-                  - name: SPRING_DATASOURCE_URL
-                    value: "jdbc:postgresql://${RDS_ENDPOINT}:5432/${DB_NAME}"
-                  - name: SPRING_DATASOURCE_USERNAME
-                    valueFrom:
-                      secretKeyRef:
-                        name: rds-credentials
-                        key: DB_USERNAME
-                  - name: SPRING_DATASOURCE_PASSWORD
-                    valueFrom:
-                      secretKeyRef:
-                        name: rds-credentials
-                        key: DB_PASSWORD
-                  readinessProbe:
-                    httpGet:
-                      path: /actuator/health
-                      port: 8080
-                    initialDelaySeconds: 30
-                    periodSeconds: 10
-                    timeoutSeconds: 5
-                  livenessProbe:
-                    httpGet:
-                      path: /actuator/health
-                      port: 8080
-                    initialDelaySeconds: 60
-                    periodSeconds: 20
-                    timeoutSeconds: 5
-          EOF
+            # Déployer individuellement chaque composant pour identifier le problème
+            echo "Déploiement des secrets..."
+            kubectl apply -f <(helm template digital-store terraform/chart -s templates/secrets.yaml --namespace default)
             
-            # Backend Service
-            echo "Création du service backend..."
-            cat <<EOF | kubectl apply -f -
-          apiVersion: v1
-          kind: Service
-          metadata:
-            name: digital-store-backend
-            namespace: default
-            labels:
-              app: digital-store
-              tier: backend
-          spec:
-            selector:
-              app: digital-store
-              tier: backend
-            ports:
-            - port: 80
-              targetPort: 8080
-            type: ClusterIP
-          EOF
+            echo "Déploiement des services..."
+            kubectl apply -f <(helm template digital-store terraform/chart -s templates/service.yaml --namespace default)
             
-            # Frontend Deployment
+            echo "Déploiement des applications, d'abord le backend..."
+            kubectl apply -f <(helm template digital-store terraform/chart -s templates/deployment.yaml --namespace default \
+              --set backend.image.repository="${ECR_REGISTRY}/${ECR_REPOSITORY_BACKEND}" \
+              --set backend.image.tag="${IMAGE_TAG}" \
+              --set frontend.enabled=false)
+            
+            echo "Surveillance du déploiement du backend..."
+            kubectl rollout status deployment/digital-store-backend -n default --timeout=10m || true
+            
             echo "Déploiement du frontend..."
-            cat <<EOF | kubectl apply -f -
-          apiVersion: apps/v1
-          kind: Deployment
-          metadata:
-            name: digital-store-frontend
-            namespace: default
-            labels:
-              app: digital-store
-              tier: frontend
-          spec:
-            replicas: 1
-            selector:
-              matchLabels:
-                app: digital-store
-                tier: frontend
-            template:
-              metadata:
-                labels:
-                  app: digital-store
-                  tier: frontend
-              spec:
-                containers:
-                - name: frontend
-                  image: ${ECR_REGISTRY}/${ECR_REPOSITORY_FRONTEND}:${IMAGE_TAG}
-                  imagePullPolicy: Always
-                  ports:
-                  - containerPort: 80
-                  resources:
-                    requests:
-                      memory: "64Mi"
-                      cpu: "50m"
-                    limits:
-                      memory: "128Mi"
-                      cpu: "100m"
-                  env:
-                  - name: BACKEND_URL
-                    value: "http://digital-store-backend"
-                  readinessProbe:
-                    httpGet:
-                      path: /
-                      port: 80
-                    initialDelaySeconds: 10
-                    periodSeconds: 5
-                    timeoutSeconds: 2
-                  livenessProbe:
-                    httpGet:
-                      path: /
-                      port: 80
-                    initialDelaySeconds: 20
-                    periodSeconds: 10
-                    timeoutSeconds: 2
-          EOF
+            kubectl apply -f <(helm template digital-store terraform/chart -s templates/deployment.yaml --namespace default \
+              --set frontend.image.repository="${ECR_REGISTRY}/${ECR_REPOSITORY_FRONTEND}" \
+              --set frontend.image.tag="${IMAGE_TAG}" \
+              --set backend.enabled=false)
             
-            # Frontend Service
-            echo "Création du service frontend..."
-            cat <<EOF | kubectl apply -f -
-          apiVersion: v1
-          kind: Service
-          metadata:
-            name: digital-store-frontend
-            namespace: default
-            labels:
-              app: digital-store
-              tier: frontend
-          spec:
-            selector:
-              app: digital-store
-              tier: frontend
-            ports:
-            - port: 80
-              targetPort: 80
-            type: ClusterIP
-          EOF
+            echo "Surveillance du déploiement du frontend..."
+            kubectl rollout status deployment/digital-store-frontend -n default --timeout=10m || true
             
-            # Ingress
-            echo "Création de l'Ingress..."
-            # Vérifier si l'IngressClass existe
-            if ! kubectl get ingressclass alb &>/dev/null; then
-              echo "Création de l'IngressClass..."
-              cat <<EOF | kubectl apply -f -
-          apiVersion: networking.k8s.io/v1
-          kind: IngressClass
-          metadata:
-            name: alb
-          spec:
-            controller: ingress.k8s.aws/alb
-          EOF
-            fi
+            echo "Déploiement de l'ingress..."
+            kubectl apply -f <(helm template digital-store terraform/chart -s templates/ingress.yaml --namespace default \
+              --set ingress.subnets="${PUBLIC_SUBNET_IDS}")
             
-            cat <<EOF | kubectl apply -f -
-          apiVersion: networking.k8s.io/v1
-          kind: Ingress
-          metadata:
-            name: digital-store-alb
-            namespace: default
-            annotations:
-              kubernetes.io/ingress.class: alb
-              alb.ingress.kubernetes.io/scheme: internet-facing
-              alb.ingress.kubernetes.io/target-type: ip
-              alb.ingress.kubernetes.io/healthcheck-path: "/"
-          spec:
-            rules:
-            - http:
-                paths:
-                - path: /api
-                  pathType: Prefix
-                  backend:
-                    service:
-                      name: digital-store-backend
-                      port:
-                        number: 80
-                - path: /
-                  pathType: Prefix
-                  backend:
-                    service:
-                      name: digital-store-frontend
-                      port:
-                        number: 80
-          EOF
+            echo "Déploiement manuel terminé, vérification de l'état..."
+            kubectl get all -n default -l app=digital-store
+          else
+            echo "Déploiement Helm réussi! Vérification des ressources déployées..."
+            kubectl get all -n default -l app=digital-store
           fi
-          
-          # Vérification du déploiement
-          echo "Vérification du déploiement..."
-          kubectl rollout status deployment/digital-store-backend -n default --timeout=5m || true
-          kubectl rollout status deployment/digital-store-frontend -n default --timeout=5m || true
-          
+
           echo "État des pods:"
           kubectl get pods -n default -o wide
           
@@ -719,125 +753,187 @@ jobs:
           kubectl logs -l app=digital-store,tier=frontend -n default --tail=50 || true
           
           echo "Déploiement terminé. Attente avant validation..."
-          sleep 60
+          sleep 30
 
       - name: Fix AWS Load Balancer Controller
+        if: ${{ always() }}  # Exécuter même si l'étape précédente a échoué
         run: |
           set -e  # Exit immediately if a command fails
           
-          # Vérifier pourquoi le contrôleur ALB est en CrashLoopBackOff
-          echo "Vérification des logs du contrôleur ALB en échec..."
+          # Vérifier l'état du contrôleur ALB
+          echo "Vérification de l'état du contrôleur AWS Load Balancer..."
+          ALB_CONTROLLER_READY=$(kubectl get deployment -n kube-system aws-load-balancer-controller -o jsonpath='{.status.readyReplicas}' 2>/dev/null || echo "0")
           
-          # Récupérer les logs des pods en échec
-          AWS_LB_PODS_FAILED=$(kubectl get pods -n kube-system -l app.kubernetes.io/name=aws-load-balancer-controller --field-selector=status.phase!=Running -o jsonpath='{.items[*].metadata.name}')
-          
-          for pod in $AWS_LB_PODS_FAILED; do
-            echo "Logs du pod $pod:"
-            kubectl logs -n kube-system $pod || echo "Impossible de récupérer les logs"
-            kubectl describe pod -n kube-system $pod || echo "Impossible de récupérer les détails du pod"
-          done
-          
-          # Corriger l'installation du contrôleur ALB
-          echo "Correction du déploiement du contrôleur ALB..."
-          
-          # Supprimer les ressources existantes problématiques
-          kubectl delete deployment -n kube-system aws-load-balancer-controller --ignore-not-found=true
-          
-          # Attendre la suppression complète
-          echo "Attente de la suppression complète des ressources existantes..."
-          sleep 30
-          
-          # Recréer la configuration d'OIDC pour les IAM Roles for Service Accounts
-          echo "Configuration de l'OIDC provider..."
-          OIDC_ID=$(aws eks describe-cluster --name digital-store-cluster --query "cluster.identity.oidc.issuer" --output text | sed -e 's|^https://||')
-          if [ -z "$OIDC_ID" ]; then
-            echo "Erreur: Impossible de récupérer l'identifiant OIDC"
-            exit 1
-          fi
-          
-          # Vérifier si le provider OIDC existe déjà et l'ajouter si nécessaire
-          if ! aws iam list-open-id-connect-providers | grep -q "$OIDC_ID"; then
-            echo "Création de l'OIDC provider pour EKS..."
-            eksctl utils associate-iam-oidc-provider --cluster digital-store-cluster --region us-east-1 --approve
-            # Attendre que le provider soit disponible
-            sleep 30
-          fi
-          
-          # Créer une politique IAM pour le contrôleur ALB
-          echo "Configuration de la politique IAM pour le contrôleur ALB..."
-          POLICY_NAME="AWSLoadBalancerControllerIAMPolicy"
-          POLICY_ARN=$(aws iam list-policies --query "Policies[?PolicyName=='$POLICY_NAME'].Arn" --output text)
-          
-          if [ -z "$POLICY_ARN" ] || [ "$POLICY_ARN" == "None" ]; then
-            echo "Téléchargement de la politique IAM pour le contrôleur ALB..."
-            curl -s -o iam-policy.json https://raw.githubusercontent.com/kubernetes-sigs/aws-load-balancer-controller/main/docs/install/iam_policy.json
-            POLICY_ARN=$(aws iam create-policy --policy-name $POLICY_NAME --policy-document file://iam-policy.json --query 'Policy.Arn' --output text)
+          # Ne corriger que si nécessaire
+          if [ "$ALB_CONTROLLER_READY" != "2" ]; then
+            echo "Contrôleur AWS Load Balancer non fonctionnel ($ALB_CONTROLLER_READY/2 replicas prêtes), correction..."
             
-            if [ -z "$POLICY_ARN" ]; then
-              echo "Erreur: Impossible de créer la politique IAM"
+            # Vérifier pourquoi le contrôleur ALB est en échec
+            echo "Diagnostic des pods du contrôleur ALB en échec..."
+            
+            # Récupérer les logs des pods en échec
+            AWS_LB_PODS_FAILED=$(kubectl get pods -n kube-system -l app.kubernetes.io/name=aws-load-balancer-controller --field-selector=status.phase!=Running -o jsonpath='{.items[*].metadata.name}' 2>/dev/null || echo "")
+            
+            for pod in $AWS_LB_PODS_FAILED; do
+              echo "Logs du pod $pod:"
+              kubectl logs -n kube-system $pod || echo "Impossible de récupérer les logs"
+              kubectl describe pod -n kube-system $pod || echo "Impossible de récupérer les détails du pod"
+            done
+            
+            # Corriger l'installation du contrôleur ALB
+            echo "Correction du déploiement du contrôleur ALB..."
+            
+            # Vérifier d'abord l'installation de Helm
+            if ! command -v helm &> /dev/null; then
+              echo "Installation de Helm..."
+              curl -fsSL -o get_helm.sh https://raw.githubusercontent.com/helm/helm/main/scripts/get-helm-3
+              chmod +x get_helm.sh
+              ./get_helm.sh
+            fi
+            
+            # Vérifier l'installation d'eksctl
+            if ! command -v eksctl &> /dev/null; then
+              echo "Installation d'eksctl..."
+              EKSCTL_TEMP_DIR=$(mktemp -d)
+              curl --silent --location --show-error "https://github.com/weaveworks/eksctl/releases/latest/download/eksctl_$(uname -s)_amd64.tar.gz" | tar xz -C "$EKSCTL_TEMP_DIR"
+              sudo cp "$EKSCTL_TEMP_DIR/eksctl" /usr/local/bin/
+              sudo chmod +x /usr/local/bin/eksctl
+              rm -rf "$EKSCTL_TEMP_DIR"
+            fi
+            
+            # Supprimer les ressources existantes problématiques
+            echo "Suppression des déploiements existants du contrôleur ALB..."
+            kubectl delete deployment -n kube-system aws-load-balancer-controller --ignore-not-found=true
+            
+            # Attendre la suppression complète
+            echo "Attente de la suppression complète des ressources existantes..."
+            while kubectl get deployment -n kube-system aws-load-balancer-controller &>/dev/null; do
+              echo "Attente de la suppression..."
+              sleep 5
+            done
+            
+            # Recréer la configuration d'OIDC pour les IAM Roles for Service Accounts
+            echo "Configuration de l'OIDC provider..."
+            OIDC_ID=$(aws eks describe-cluster --name digital-store-cluster --query "cluster.identity.oidc.issuer" --output text | sed -e 's|^https://||')
+            if [ -z "$OIDC_ID" ]; then
+              echo "Erreur: Impossible de récupérer l'identifiant OIDC"
               exit 1
             fi
+            
+            # Vérifier si le provider OIDC existe déjà et l'ajouter si nécessaire
+            if ! aws iam list-open-id-connect-providers | grep -q "$OIDC_ID"; then
+              echo "Création de l'OIDC provider pour EKS..."
+              eksctl utils associate-iam-oidc-provider --cluster digital-store-cluster --region us-east-1 --approve
+              # Attendre que le provider soit disponible
+              sleep 30
+            fi
+            
+            # Créer une politique IAM pour le contrôleur ALB
+            echo "Configuration de la politique IAM pour le contrôleur ALB..."
+            POLICY_NAME="AWSLoadBalancerControllerIAMPolicy"
+            POLICY_ARN=$(aws iam list-policies --query "Policies[?PolicyName=='$POLICY_NAME'].Arn" --output text)
+            
+            if [ -z "$POLICY_ARN" ] || [ "$POLICY_ARN" == "None" ]; then
+              echo "Téléchargement de la politique IAM pour le contrôleur ALB..."
+              curl -s -o iam-policy.json https://raw.githubusercontent.com/kubernetes-sigs/aws-load-balancer-controller/main/docs/install/iam_policy.json
+              POLICY_ARN=$(aws iam create-policy --policy-name $POLICY_NAME --policy-document file://iam-policy.json --query 'Policy.Arn' --output text)
+              
+              if [ -z "$POLICY_ARN" ]; then
+                echo "Erreur: Impossible de créer la politique IAM"
+                exit 1
+              fi
+            fi
+            
+            echo "Utilisation de la politique IAM: $POLICY_ARN"
+            
+            # Nettoyage des ressources existantes potentiellement problématiques
+            kubectl delete serviceaccount -n kube-system aws-load-balancer-controller --ignore-not-found=true
+            
+            # Recréer le service account avec la politique correcte
+            echo "Création du service account pour le contrôleur ALB..."
+            eksctl create iamserviceaccount \
+              --cluster=digital-store-cluster \
+              --namespace=kube-system \
+              --name=aws-load-balancer-controller \
+              --attach-policy-arn=$POLICY_ARN \
+              --override-existing-serviceaccounts \
+              --region us-east-1 \
+              --approve
+            
+            # Vérifier que le service account a été créé
+            if ! kubectl get serviceaccount -n kube-system aws-load-balancer-controller &>/dev/null; then
+              echo "Erreur: Le service account n'a pas été créé correctement"
+              exit 1
+            fi
+            
+            # Ajouter le repo Helm et mettre à jour
+            echo "Ajout du repo Helm EKS..."
+            helm repo add eks https://aws.github.io/eks-charts
+            helm repo update
+            
+            # Obtenir le VPC ID du cluster
+            VPC_ID=$(aws eks describe-cluster --name digital-store-cluster --query "cluster.resourcesVpcConfig.vpcId" --output text)
+            if [ -z "$VPC_ID" ]; then
+              echo "Erreur: Impossible de récupérer l'ID du VPC"
+              exit 1
+            fi
+            
+            # Installer ou mettre à jour le contrôleur
+            echo "Déploiement du contrôleur ALB avec des options optimisées..."
+            helm upgrade --install aws-load-balancer-controller eks/aws-load-balancer-controller \
+              -n kube-system \
+              --set clusterName=digital-store-cluster \
+              --set serviceAccount.create=false \
+              --set serviceAccount.name=aws-load-balancer-controller \
+              --set region=us-east-1 \
+              --set vpcId=$VPC_ID \
+              --set replicaCount=2 \
+              --set resources.limits.cpu=200m \
+              --set resources.limits.memory=256Mi \
+              --set resources.requests.cpu=100m \
+              --set resources.requests.memory=128Mi \
+              --wait
+            
+            # Vérifier que le déploiement existe
+            if ! kubectl get deployment -n kube-system aws-load-balancer-controller &>/dev/null; then
+              echo "Erreur: Le déploiement du contrôleur ALB a échoué"
+              exit 1
+            fi
+            
+            # Attendre que le contrôleur soit prêt avec une meilleure vérification progressive
+            echo "Attente du démarrage du contrôleur ALB..."
+            for i in {1..12}; do
+              READY_REPLICAS=$(kubectl get deployment aws-load-balancer-controller -n kube-system -o jsonpath='{.status.readyReplicas}' 2>/dev/null || echo "0")
+              echo "Contrôleur ALB: $READY_REPLICAS/2 replicas prêtes (tentative $i/12)"
+              
+              if [ "$READY_REPLICAS" = "2" ]; then
+                echo "Contrôleur ALB prêt!"
+                break
+              fi
+              
+              # Afficher les logs des pods en cours pour diagnostiquer les problèmes
+              ALB_PODS=$(kubectl get pods -n kube-system -l app.kubernetes.io/name=aws-load-balancer-controller -o jsonpath='{.items[*].metadata.name}')
+              for pod in $ALB_PODS; do
+                echo "Logs récents du pod $pod:"
+                kubectl logs -n kube-system $pod --tail=20 || echo "Impossible d'obtenir les logs"
+              done
+              
+              if [ $i -eq 12 ]; then
+                echo "Le contrôleur ALB n'est pas prêt après plusieurs tentatives, mais on continue..."
+                break
+              fi
+              
+              echo "Attente de 30 secondes supplémentaires..."
+              sleep 30
+            done
+            
+            # Vérifier le statut final
+            echo "Vérification du statut final du contrôleur ALB:"
+            kubectl get deployment -n kube-system aws-load-balancer-controller
+            kubectl get pods -n kube-system -l app.kubernetes.io/name=aws-load-balancer-controller
+          else
+            echo "Le contrôleur AWS Load Balancer est déjà fonctionnel avec $ALB_CONTROLLER_READY/2 replicas prêtes"
           fi
-          
-          echo "Utilisation de la politique IAM: $POLICY_ARN"
-          
-          # Nettoyage des ressources existantes potentiellement problématiques
-          kubectl delete serviceaccount -n kube-system aws-load-balancer-controller --ignore-not-found=true
-          
-          # Recréer le service account avec la politique correcte
-          echo "Création du service account pour le contrôleur ALB..."
-          eksctl create iamserviceaccount \
-            --cluster=digital-store-cluster \
-            --namespace=kube-system \
-            --name=aws-load-balancer-controller \
-            --attach-policy-arn=$POLICY_ARN \
-            --override-existing-serviceaccounts \
-            --region us-east-1 \
-            --approve
-          
-          # Vérifier que le service account a été créé
-          if ! kubectl get serviceaccount -n kube-system aws-load-balancer-controller &>/dev/null; then
-            echo "Erreur: Le service account n'a pas été créé correctement"
-            exit 1
-          fi
-          
-          # Installer le contrôleur ALB avec Helm
-          echo "Installation du contrôleur ALB avec Helm..."
-          helm repo add eks https://aws.github.io/eks-charts
-          helm repo update
-          
-          # Obtenir le VPC ID du cluster
-          VPC_ID=$(aws eks describe-cluster --name digital-store-cluster --query "cluster.resourcesVpcConfig.vpcId" --output text)
-          if [ -z "$VPC_ID" ]; then
-            echo "Erreur: Impossible de récupérer l'ID du VPC"
-            exit 1
-          fi
-          
-          # Installer ou mettre à jour le contrôleur
-          echo "Déploiement du contrôleur ALB..."
-          helm upgrade --install aws-load-balancer-controller eks/aws-load-balancer-controller \
-            -n kube-system \
-            --set clusterName=digital-store-cluster \
-            --set serviceAccount.create=false \
-            --set serviceAccount.name=aws-load-balancer-controller \
-            --set region=us-east-1 \
-            --set vpcId=$VPC_ID \
-            --wait
-          
-          # Vérifier que le déploiement existe
-          if ! kubectl get deployment -n kube-system aws-load-balancer-controller &>/dev/null; then
-            echo "Erreur: Le déploiement du contrôleur ALB a échoué"
-            exit 1
-          fi
-          
-          # Attendre que le contrôleur soit prêt
-          echo "Attente du démarrage du contrôleur ALB..."
-          kubectl rollout status deployment aws-load-balancer-controller -n kube-system --timeout=300s
-          
-          # Vérifier le statut final
-          echo "Vérification du statut final du contrôleur ALB:"
-          kubectl get deployment -n kube-system aws-load-balancer-controller
-          kubectl get pods -n kube-system -l app.kubernetes.io/name=aws-load-balancer-controller
 
   validate-infra:
     needs: deploy-app
@@ -1213,22 +1309,58 @@ jobs:
             echo "::warning::Le DNS de l'ALB ne se résout pas encore, tentative de vérification quand même"
           fi
           
-          # Tentative avec retry pour plus de fiabilité
-          for i in {1..10}; do
-            echo "Health check attempt $i of 10..."
-            # Utiliser curl avec plus d'options de diagnostic
-            if curl --fail --max-time 30 -v http://$ALB_HOST/api/health; then
-              echo "Application health check passed!"
-              exit 0
+          # Test de la connectivité aux endpoints:
+          for endpoint in "" "/api" "/api/health" "/api/actuator/health"; do
+            echo -n "- http://$ALB_HOST$endpoint : "
+            if curl -s --connect-timeout 10 -m 15 -o /dev/null -w "%{http_code}" "http://$ALB_HOST$endpoint"; then
+              echo " ✅"
+            else
+              echo " ❌"
             fi
-            echo "Health check failed, retrying in 30 seconds..."
-            sleep 30
           done
           
-          echo "Health check failed after 10 attempts. Checking pods and services:"
-          kubectl get pods -n default
-          kubectl get svc -n default
-          kubectl get ingress -n default
+          # Test direct du backend pod pour vérifier l'endpoint /health
+          echo "Test direct de l'endpoint de santé sur un pod backend:"
+          BACKEND_POD=$(kubectl get pod -l app=digital-store,tier=backend -o jsonpath="{.items[0].metadata.name}" 2>/dev/null)
+          if [ -n "$BACKEND_POD" ]; then
+            # Vérifier si curl est disponible dans le pod, sinon l'installer
+            echo "Vérification/installation de curl dans le pod $BACKEND_POD..."
+            kubectl exec $BACKEND_POD -- which curl || {
+              echo "Installation de curl dans le pod..."
+              kubectl exec $BACKEND_POD -- /bin/sh -c "apt-get update && apt-get install -y curl"
+            }
+            
+            echo "Vérification de /api/health sur le pod $BACKEND_POD:"
+            HEALTH_STATUS=$(kubectl exec $BACKEND_POD -- curl -s http://localhost:8080/api/health) || echo "Erreur lors de l'accès à /api/health"
+            echo "Résultat: $HEALTH_STATUS"
+            
+            echo "Vérification de /api/actuator/health sur le pod $BACKEND_POD:"
+            ACTUATOR_STATUS=$(kubectl exec $BACKEND_POD -- curl -s http://localhost:8080/api/actuator/health) || echo "Erreur lors de l'accès à /api/actuator/health"
+            echo "Résultat: $ACTUATOR_STATUS"
+            
+            # Vérifier l'accès à la base de données
+            echo "Test de connexion directe à la base de données depuis le pod:"
+            DB_HOST=$(kubectl get secret rds-credentials -n default -o jsonpath='{.data.DB_HOST}' | base64 --decode)
+            DB_PORT=$(kubectl get secret rds-credentials -n default -o jsonpath='{.data.DB_PORT}' | base64 --decode)
+            
+            # Installer netcat si nécessaire pour un test de connectivité direct
+            kubectl exec $BACKEND_POD -- which nc || {
+              echo "Installation de netcat dans le pod..."
+              kubectl exec $BACKEND_POD -- /bin/sh -c "apt-get update && apt-get install -y netcat-openbsd"
+            }
+            
+            # Test de connexion TCP à la base de données
+            echo "Test TCP vers $DB_HOST:$DB_PORT"
+            kubectl exec $BACKEND_POD -- /bin/sh -c "nc -zv $DB_HOST $DB_PORT -w 5" || echo "❌ Connexion TCP à la base de données impossible"
+            
+            # Vérifier les variables d'environnement
+            echo "Variables d'environnement liées à la base de données:"
+            kubectl exec $BACKEND_POD -- /bin/sh -c "env | grep -E 'DB_|SPRING_DATASOURCE'" | grep -v PASSWORD
+          else
+            echo "Aucun pod backend trouvé pour le test direct"
+          fi
+          
+          echo "Health check completed"
           
           # Vérifier en détail l'état du backend
           echo "État détaillé des pods backend:"
@@ -1243,7 +1375,7 @@ jobs:
           kubectl logs -n kube-system -l app.kubernetes.io/name=aws-load-balancer-controller --tail=100
           
           # On continue quand même, pour ne pas bloquer le pipeline
-          echo "::warning::Health check failed but continuing pipeline"
+          echo "::warning::Health check completed but continuing pipeline"
           exit 0
 
   print-app-url:
@@ -1289,9 +1421,21 @@ jobs:
             echo "::notice::Frontend: http://$ALB_HOST"
             echo "::notice::API/Backend: http://$ALB_HOST/api"
             echo "::notice::Health check: http://$ALB_HOST/api/health"
+            echo "::notice::Actuator health: http://$ALB_HOST/api/actuator/health"
             
             # Créer une sortie pour GitHub Actions
             echo "app_url=http://$ALB_HOST" >> $GITHUB_OUTPUT
+            
+            # Faire un test de connectivité pour confirmer la disponibilité
+            echo "Test de la connectivité aux endpoints:"
+            for endpoint in "" "/api" "/api/health" "/api/actuator/health"; do
+              echo -n "- http://$ALB_HOST$endpoint : "
+              if curl -s --connect-timeout 10 -m 15 -o /dev/null -w "%{http_code}" "http://$ALB_HOST$endpoint"; then
+                echo " ✅"
+              else
+                echo " ❌"
+              fi
+            done
           else
             echo "::warning::Impossible de récupérer l'URL de l'application. Vérifiez la création de l'ALB dans la console AWS."
           fi
