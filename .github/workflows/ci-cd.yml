@@ -245,6 +245,10 @@ jobs:
           
       - name: Create IAM OIDC Provider if needed
         run: |
+          # Installer eksctl
+          curl --silent --location "https://github.com/weaveworks/eksctl/releases/latest/download/eksctl_$(uname -s)_amd64.tar.gz" | tar xz -C /tmp
+          sudo mv /tmp/eksctl /usr/local/bin
+          eksctl version
           # Vérifier si le fournisseur OIDC existe déjà
           OIDC_ID=$(aws eks describe-cluster --name digital-store-cluster --query "cluster.identity.oidc.issuer" --output text | sed -e 's|^https://||')
           PROVIDER_EXISTS=$(aws iam list-open-id-connect-providers | grep $OIDC_ID || echo "")
@@ -261,10 +265,15 @@ jobs:
           
       - name: Install AWS Load Balancer Controller
         run: |
-          # Installer eksctl
-          curl --silent --location "https://github.com/weaveworks/eksctl/releases/latest/download/eksctl_$(uname -s)_amd64.tar.gz" | tar xz -C /tmp
-          sudo mv /tmp/eksctl /usr/local/bin
-          eksctl version
+          # Vérifier si eksctl est déjà installé
+          if ! command -v eksctl &> /dev/null; then
+            echo "Installing eksctl..."
+            curl --silent --location "https://github.com/weaveworks/eksctl/releases/latest/download/eksctl_$(uname -s)_amd64.tar.gz" | tar xz -C /tmp
+            sudo mv /tmp/eksctl /usr/local/bin
+            eksctl version
+          else
+            echo "eksctl is already installed"
+          fi
           
           # Installer jq si non présent
           if ! command -v jq &> /dev/null; then
