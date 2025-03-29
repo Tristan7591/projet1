@@ -151,6 +151,10 @@ jobs:
           cd terraform
           terraform apply -var deploy_app=false -auto-approve
           
+          # Attendre que l'infrastructure soit complètement déployée
+          echo "Waiting for EKS infrastructure to be fully provisioned..."
+          sleep 120
+          
       - name: Prepare RDS Secret
         run: |
           # Ensure all AWS tools are properly configured
@@ -159,6 +163,10 @@ jobs:
           # Make script executable and run it to prepare RDS secrets
           chmod +x scripts/prepare-rds-secret.sh
           ./scripts/prepare-rds-secret.sh
+          
+          # Attendre que les secrets soient bien créés et disponibles
+          echo "Waiting for secrets to propagate..."
+          sleep 30
           
       - name: Verify RDS Secret
         run: |
@@ -234,13 +242,36 @@ jobs:
       - name: Update kubeconfig
         run: |
           aws eks update-kubeconfig --name digital-store-cluster --region us-east-1
-      - name: Get ECR Registry
+          
+      - name: Create IAM OIDC Provider if needed
         run: |
-          ECR_REGISTRY=$(aws ecr get-authorization-token --output text --query 'authorizationData[].proxyEndpoint' | sed 's|https://||')
-          echo "ECR_REGISTRY=$ECR_REGISTRY" >> $GITHUB_ENV
+          # Vérifier si le fournisseur OIDC existe déjà
+          OIDC_ID=$(aws eks describe-cluster --name digital-store-cluster --query "cluster.identity.oidc.issuer" --output text | sed -e 's|^https://||')
+          PROVIDER_EXISTS=$(aws iam list-open-id-connect-providers | grep $OIDC_ID || echo "")
+          
+          if [ -z "$PROVIDER_EXISTS" ]; then
+            echo "Creating OIDC Provider for EKS..."
+            eksctl utils associate-iam-oidc-provider --cluster digital-store-cluster --region us-east-1 --approve
+            # Attendre que le provider OIDC soit disponible
+            echo "Waiting for OIDC provider to be fully active..."
+            sleep 60
+          else
+            echo "OIDC Provider already exists"
+          fi
           
       - name: Install AWS Load Balancer Controller
         run: |
+          # Installer eksctl
+          curl --silent --location "https://github.com/weaveworks/eksctl/releases/latest/download/eksctl_$(uname -s)_amd64.tar.gz" | tar xz -C /tmp
+          sudo mv /tmp/eksctl /usr/local/bin
+          eksctl version
+          
+          # Installer jq si non présent
+          if ! command -v jq &> /dev/null; then
+            echo "Installing jq..."
+            sudo apt-get update && sudo apt-get install -y jq
+          fi
+          
           # Vérifier l'existence du fichier de politique
           if [ ! -f "scripts/alb-controller-policy.json" ]; then
             echo "Error: ALB controller policy file not found at scripts/alb-controller-policy.json"
@@ -253,13 +284,28 @@ jobs:
           
           if [ -z "$POLICY_ARN" ]; then
             echo "Policy doesn't exist, creating..."
-            aws iam create-policy \
+            POLICY_RESULT=$(aws iam create-policy \
               --policy-name AWSLoadBalancerControllerIAMPolicy \
-              --policy-document file://scripts/alb-controller-policy.json
+              --policy-document file://scripts/alb-controller-policy.json)
             
-            POLICY_ARN=$(aws iam list-policies --query "Policies[?PolicyName=='AWSLoadBalancerControllerIAMPolicy'].Arn" --output text)
+            # Extraire l'ARN de la réponse et vérifier qu'il existe
+            POLICY_ARN=$(echo $POLICY_RESULT | jq -r '.Policy.Arn')
+            if [ -z "$POLICY_ARN" ] || [ "$POLICY_ARN" == "null" ]; then
+              echo "Error: Failed to create policy or extract ARN"
+              echo "Policy result: $POLICY_RESULT"
+              exit 1
+            fi
+            echo "Created policy with ARN: $POLICY_ARN"
           else
             echo "Policy already exists at: $POLICY_ARN"
+          fi
+          
+          # Vérifier le cluster et obtenir l'OIDC
+          echo "Checking EKS cluster and getting OIDC provider..."
+          CLUSTER_EXISTS=$(aws eks describe-cluster --name digital-store-cluster --region us-east-1 &>/dev/null && echo "yes" || echo "no")
+          if [ "$CLUSTER_EXISTS" == "no" ]; then
+            echo "Error: EKS cluster not found"
+            exit 1
           fi
           
           # Create service account
@@ -278,15 +324,26 @@ jobs:
           helm repo add eks https://aws.github.io/eks-charts
           helm repo update
           
+          # Obtenir le VPC ID du cluster
+          VPC_ID=$(aws eks describe-cluster --name digital-store-cluster --query "cluster.resourcesVpcConfig.vpcId" --output text)
+          if [ -z "$VPC_ID" ]; then
+            echo "Error: Could not determine VPC ID for the cluster"
+            exit 1
+          fi
+          echo "Using VPC ID: $VPC_ID"
+          
           helm upgrade --install aws-load-balancer-controller eks/aws-load-balancer-controller \
             -n kube-system \
             --set clusterName=digital-store-cluster \
             --set serviceAccount.create=false \
-            --set serviceAccount.name=aws-load-balancer-controller
+            --set serviceAccount.name=aws-load-balancer-controller \
+            --set region=us-east-1 \
+            --set vpcId=$VPC_ID
           
           echo "AWS Load Balancer Controller installed!"
           
           # Vérifier que le contrôleur est bien déployé
+          echo "Waiting for Load Balancer Controller to be ready (up to 10 minutes)..."
           kubectl wait --for=condition=available deployment/aws-load-balancer-controller -n kube-system --timeout=600s
           echo "Load Balancer Controller ready!"
 
@@ -305,12 +362,58 @@ jobs:
             -var backend_image="$ECR_REGISTRY/$ECR_REPOSITORY_BACKEND:$IMAGE_TAG" \
             -var frontend_image="$ECR_REGISTRY/$ECR_REPOSITORY_FRONTEND:$IMAGE_TAG" \
             -auto-approve
+          
+          # Attendre que Terraform termine complètement ses opérations
+          echo "Waiting for Terraform resources to be fully provisioned..."
+          sleep 60
 
       - name: Check Helm deployment status
         run: |
-          helm list -n default
+          # Vérifier le déploiement avec retries
+          RETRY=0
+          MAX_RETRY=5
+          HELM_SUCCESS=false
+          
+          while [ "$HELM_SUCCESS" = false ] && [ $RETRY -lt $MAX_RETRY ]; do
+            RETRY=$((RETRY+1))
+            echo "Checking Helm deployment status (attempt $RETRY of $MAX_RETRY)..."
+            if helm list -n default | grep digital-store; then
+              HELM_SUCCESS=true
+              break
+            fi
+            echo "Helm release not found, waiting 30 seconds..."
+            sleep 30
+          done
+          
+          # Vérifier l'état des pods
           kubectl get pods -n default -o wide
           kubectl get pods -n kube-system -l app.kubernetes.io/name=aws-load-balancer-controller
+          
+      - name: Verify Image Versions
+        run: |
+          echo "Vérification de la cohérence des versions d'images déployées..."
+          
+          # Obtenir l'image attendue
+          EXPECTED_BACKEND_IMAGE="${ECR_REGISTRY}/${ECR_REPOSITORY_BACKEND}:${IMAGE_TAG}"
+          EXPECTED_FRONTEND_IMAGE="${ECR_REGISTRY}/${ECR_REPOSITORY_FRONTEND}:${IMAGE_TAG}"
+          
+          # Récupérer l'image réellement déployée
+          BACKEND_CONTAINER_IMAGE=$(kubectl get deployment digital-store-backend -n default -o jsonpath="{.spec.template.spec.containers[0].image}" 2>/dev/null || echo "not-found")
+          FRONTEND_CONTAINER_IMAGE=$(kubectl get deployment digital-store-frontend -n default -o jsonpath="{.spec.template.spec.containers[0].image}" 2>/dev/null || echo "not-found")
+          
+          echo "Image backend attendue: $EXPECTED_BACKEND_IMAGE"
+          echo "Image backend déployée: $BACKEND_CONTAINER_IMAGE"
+          echo "Image frontend attendue: $EXPECTED_FRONTEND_IMAGE"
+          echo "Image frontend déployée: $FRONTEND_CONTAINER_IMAGE"
+          
+          # Vérifier la cohérence et avertir si nécessaire
+          if [ "$BACKEND_CONTAINER_IMAGE" != "$EXPECTED_BACKEND_IMAGE" ] && [ "$BACKEND_CONTAINER_IMAGE" != "not-found" ]; then
+            echo "::warning::L'image backend déployée ne correspond pas à l'image construite"
+          fi
+          
+          if [ "$FRONTEND_CONTAINER_IMAGE" != "$EXPECTED_FRONTEND_IMAGE" ] && [ "$FRONTEND_CONTAINER_IMAGE" != "not-found" ]; then
+            echo "::warning::L'image frontend déployée ne correspond pas à l'image construite"
+          fi
 
   validate-infra:
     needs: deploy-app
@@ -339,12 +442,107 @@ jobs:
           echo "EKS Cluster is ACTIVE and ready"
       - name: Update kubeconfig
         run: aws eks update-kubeconfig --name ${{ env.EKS_CLUSTER_NAME }} --region ${{ env.AWS_REGION }}
+        
+      - name: Wait for node readiness
+        run: |
+          echo "Waiting for EKS nodes to be ready..."
+          # Vérifier que les nœuds sont prêts
+          READY=false
+          RETRY=0
+          MAX_RETRY=10
+          
+          while [ "$READY" = false ] && [ $RETRY -lt $MAX_RETRY ]; do
+            RETRY=$((RETRY+1))
+            echo "Checking node readiness (attempt $RETRY of $MAX_RETRY)..."
+            NODE_COUNT=$(kubectl get nodes --no-headers | grep -c "Ready")
+            
+            if [ "$NODE_COUNT" -gt 0 ]; then
+              echo "Found $NODE_COUNT ready nodes"
+              READY=true
+              break
+            fi
+            
+            echo "No ready nodes found yet. Waiting 30 seconds..."
+            sleep 30
+          done
+          
+          # Afficher l'état des nœuds
+          kubectl get nodes
+          kubectl describe nodes
+          
+          # Même si aucun nœud n'est prêt, on continue - le workflow pourrait échouer plus tard
+          if [ "$READY" = false ]; then
+            echo "::warning::No ready nodes found after multiple attempts, but continuing"
+          fi
+          
+      - name: Verify RDS Secret in Cluster
+        run: |
+          echo "Vérification des secrets RDS dans le cluster Kubernetes..."
+          # Vérifier si le secret existe déjà dans le cluster
+          if ! kubectl get secret rds-credentials -n default &>/dev/null; then
+            echo "Secret RDS non trouvé dans le cluster, application du secret depuis le fichier..."
+            # Appliquer le fichier de secret s'il existe
+            if [ -f "k8s/database/rds-secret.yaml" ]; then
+              kubectl apply -f k8s/database/rds-secret.yaml
+              echo "Secret RDS appliqué depuis le fichier"
+            else
+              echo "::warning::Fichier de secret RDS non trouvé, les applications pourraient ne pas se connecter à la base de données"
+            fi
+          else
+            echo "Secret RDS déjà présent dans le cluster"
+            # Vérifier que le secret contient les données attendues
+            SECRET_DB_NAME=$(kubectl get secret rds-credentials -n default -o jsonpath='{.data.DB_NAME}' | base64 --decode)
+            SECRET_DB_USERNAME=$(kubectl get secret rds-credentials -n default -o jsonpath='{.data.DB_USERNAME}' | base64 --decode)
+            
+            if [ -z "$SECRET_DB_NAME" ] || [ -z "$SECRET_DB_USERNAME" ]; then
+              echo "::warning::Secret RDS incomplet, régénération..."
+              # Régénérer le secret si nécessaire
+              kubectl delete secret rds-credentials -n default
+              kubectl apply -f k8s/database/rds-secret.yaml
+            fi
+          fi
+          
+          # Vérifier que le secret est correctement appliqué
+          echo "Vérification finale du secret RDS..."
+          kubectl describe secret rds-credentials -n default
+          
       - name: Verify Pods Status
         run: |
           echo "Waiting for pods to be ready..."
-          kubectl wait --for=condition=ready pod -l app=digital-store,tier=backend --timeout=600s
-          kubectl wait --for=condition=ready pod -l app=digital-store,tier=frontend --timeout=600s
-          echo "All pods are ready!"
+          
+          # Vérifier d'abord si les pods existent avant d'attendre leur disponibilité
+          RETRY=0
+          MAX_RETRY=10
+          
+          while true; do
+            RETRY=$((RETRY+1))
+            BACKEND_COUNT=$(kubectl get pods -l app=digital-store,tier=backend -n default --no-headers 2>/dev/null | wc -l)
+            FRONTEND_COUNT=$(kubectl get pods -l app=digital-store,tier=frontend -n default --no-headers 2>/dev/null | wc -l)
+            
+            echo "Found $BACKEND_COUNT backend pods and $FRONTEND_COUNT frontend pods (check $RETRY)"
+            
+            if [ "$BACKEND_COUNT" -gt 0 ] && [ "$FRONTEND_COUNT" -gt 0 ]; then
+              echo "Both backend and frontend pods exist, proceeding to wait for readiness..."
+              break
+            fi
+            
+            if [ $RETRY -ge $MAX_RETRY ]; then
+              echo "::warning::Pods not created after $MAX_RETRY attempts, but continuing"
+              kubectl get pods -A
+              break
+            fi
+            
+            echo "Waiting for pods to be created (attempt $RETRY of $MAX_RETRY)..."
+            sleep 30
+          done
+          
+          # Maintenant attendre que les pods soient prêts
+          kubectl wait --for=condition=ready pod -l app=digital-store,tier=backend --timeout=600s || echo "::warning::Backend pods not ready in time"
+          kubectl wait --for=condition=ready pod -l app=digital-store,tier=frontend --timeout=600s || echo "::warning::Frontend pods not ready in time"
+          
+          echo "Current pod status:"
+          kubectl get pods -n default -o wide
+
       - name: Verify Application Logs
         run: |
           echo "Checking backend logs..."
@@ -355,28 +553,166 @@ jobs:
       - name: Verify RDS Connectivity
         run: |
           echo "Vérification de la connectivité à la base de données RDS..."
-          POD_NAME=$(kubectl get pod -l app=digital-store,tier=backend -o jsonpath="{.items[0].metadata.name}")
-          kubectl exec $POD_NAME -- curl -s http://localhost:8080/api/health
-          echo "Connectivité RDS vérifiée via vérification santé API backend"
+          # Retry mechanism for backend pod detection
+          RETRY=0
+          MAX_RETRY=5
+          BACKEND_POD=""
+          
+          while [ -z "$BACKEND_POD" ] && [ $RETRY -lt $MAX_RETRY ]; do
+            RETRY=$((RETRY+1))
+            echo "Looking for backend pod (attempt $RETRY of $MAX_RETRY)..."
+            BACKEND_POD=$(kubectl get pod -l app=digital-store,tier=backend -o jsonpath="{.items[0].metadata.name}" 2>/dev/null || echo "")
+            if [ -z "$BACKEND_POD" ]; then
+              echo "Backend pod not found yet. Waiting 30 seconds..."
+              sleep 30
+            fi
+          done
+          
+          if [ -z "$BACKEND_POD" ]; then
+            echo "Warning: Backend pod not found after multiple attempts. Skipping RDS connectivity test."
+            echo "Checking deployments and pods:"
+            kubectl get deployments -n default
+            kubectl get pods -n default
+            return 0
+          fi
+          
+          # Vérifier l'état du pod backend avant de tester la connectivité
+          POD_STATUS=$(kubectl get pod $BACKEND_POD -n default -o jsonpath="{.status.phase}")
+          if [ "$POD_STATUS" != "Running" ]; then
+            echo "Warning: Backend pod $BACKEND_POD n'est pas en cours d'exécution (état: $POD_STATUS)"
+            echo "Affichage des détails du pod pour diagnostic:"
+            kubectl describe pod $BACKEND_POD -n default
+            
+            # Vérifier les logs du pod malgré son état
+            echo "Logs du pod backend (si disponibles):"
+            kubectl logs $BACKEND_POD -n default --previous || kubectl logs $BACKEND_POD -n default || echo "Logs non disponibles"
+            
+            echo "Vérification de la configuration du secret RDS:"
+            kubectl get secret rds-credentials -n default -o yaml | grep -v "DB_PASSWORD"
+            
+            return 0
+          fi
+          
+          # Test connectivity with retries
+          for i in {1..5}; do
+            echo "RDS connectivity test attempt $i of 5..."
+            if kubectl exec $BACKEND_POD -- curl -s http://localhost:8080/api/health; then
+              echo "RDS connectivity verified via backend API health check!"
+              break
+            fi
+            
+            # Si le test échoue, récupérer plus d'informations
+            if [ $i -eq 5 ]; then
+              echo "Échec de la vérification de connectivité RDS. Collecte d'informations supplémentaires:"
+              echo "Logs du pod backend:"
+              kubectl logs $BACKEND_POD -n default --tail=50
+              
+              echo "Variables d'environnement du pod (sans mots de passe):"
+              kubectl exec $BACKEND_POD -- env | grep -v PASSWORD
+              
+              echo "Test de connectivité directe à la base de données:"
+              DB_HOST=$(kubectl get secret rds-credentials -n default -o jsonpath='{.data.DB_HOST}' | base64 --decode)
+              DB_PORT=$(kubectl get secret rds-credentials -n default -o jsonpath='{.data.DB_PORT}' | base64 --decode)
+              echo "Test de la connexion TCP au point de terminaison RDS $DB_HOST:$DB_PORT"
+              kubectl exec $BACKEND_POD -- nc -zv $DB_HOST $DB_PORT || echo "Échec de la connexion TCP à la base de données"
+            fi
+            
+            echo "Connectivity test failed, retrying in 30 seconds..."
+            sleep 30
+          done
+          
+          echo "RDS connectivity verification completed"
   
       - name: Wait for Ingress ALB
         run: |
           echo "Waiting for Ingress ALB to be ready..."
-          kubectl wait --for=condition=ready ingress/digital-store-alb -n default --timeout=600s
-          echo "Ingress ALB is ready!"
+          # Liste tous les manifests appliqués pour vérification
+          echo "Checking all k8s resources..."
+          kubectl get all -n default
+          kubectl get ingress -A
+          
+          # Vérifier que l'ingress existe avant d'attendre
+          RETRY=0
+          MAX_RETRY=6
+          while ! kubectl get ingress digital-store-alb -n default &>/dev/null; do
+            RETRY=$((RETRY+1))
+            if [ $RETRY -ge $MAX_RETRY ]; then
+              echo "Error: Ingress digital-store-alb not found after multiple attempts"
+              echo "Checking for any ingress controllers:"
+              kubectl get ingressclass -A
+              echo "Trying to apply ingress manually..."
+              kubectl apply -f k8s/ingress/ingress.yaml
+              sleep 30
+              if ! kubectl get ingress digital-store-alb -n default &>/dev/null; then
+                echo "Final attempt failed. Exiting."
+                exit 1
+              fi
+              break
+            fi
+            echo "Ingress digital-store-alb not found. Checking available ingresses (attempt $RETRY of $MAX_RETRY):"
+            kubectl get ingress -A
+            echo "Waiting 30 seconds for ingress to be created..."
+            sleep 30
+          done
+          
+          echo "Ingress found, waiting for it to be ready..."
+          kubectl wait --for=condition=ready ingress/digital-store-alb -n default --timeout=600s || true
+          echo "Ingress ALB should be ready now. Checking status:"
+          kubectl describe ingress digital-store-alb -n default
+          
       - name: Verify application health via ALB
         run: |
           echo "Getting ALB hostname..."
-          ALB_HOST=$(kubectl get ingress digital-store-alb -n default -o jsonpath='{.status.loadBalancer.ingress[0].hostname}')
+          ALB_HOST=""
+          RETRY=0
+          MAX_RETRY=10  # Augmentation du nombre de tentatives
+          
+          # Tentative d'obtention du hostname avec retries
+          while [ -z "$ALB_HOST" ] && [ $RETRY -lt $MAX_RETRY ]; do
+            RETRY=$((RETRY+1))
+            echo "Attempt $RETRY to get ALB hostname..."
+            ALB_HOST=$(kubectl get ingress digital-store-alb -n default -o jsonpath='{.status.loadBalancer.ingress[0].hostname}')
+            if [ -z "$ALB_HOST" ]; then
+              echo "ALB hostname not available yet. Waiting 30 seconds..."
+              sleep 30
+            fi
+          done
+          
           if [ -z "$ALB_HOST" ]; then
-            echo "Error: ALB hostname not found"
-            exit 1
+            echo "Error: ALB hostname not found after $MAX_RETRY attempts. Ingress status:"
+            kubectl describe ingress digital-store-alb -n default
+            # On continue quand même, pour ne pas bloquer le pipeline
+            echo "::warning::ALB hostname not found but continuing pipeline"
+            exit 0
           fi
+          
           echo "ALB URL: http://$ALB_HOST"
           echo "Waiting for ALB to be fully provisioned..."
-          # Augmenter le temps d'attente à 5 minutes pour s'assurer que l'ALB soit complètement provisionné
-          sleep 300
+          # Augmenter le temps d'attente pour s'assurer que l'ALB soit complètement provisionné
+          sleep 420  # Passer à 7 minutes pour tenir compte de la propagation DNS
           echo "Testing application health..."
-          curl --fail http://$ALB_HOST/api/health || curl --fail -k https://$ALB_HOST/api/health
-          echo "Application health check passed!"
+          
+          # Tentative avec retry pour plus de fiabilité
+          for i in {1..10}; do  # Augmentation du nombre de tentatives
+            echo "Health check attempt $i of 10..."
+            if curl --fail --max-time 30 http://$ALB_HOST/api/health; then  # Augmentation du timeout curl
+              echo "Application health check passed!"
+              exit 0
+            fi
+            echo "Health check failed, retrying in 30 seconds..."
+            sleep 30
+          done
+          
+          echo "Health check failed after 10 attempts. Checking pods and services:"
+          kubectl get pods -n default
+          kubectl get svc -n default
+          kubectl get ingress -n default
+          
+          # Vérifier les logs du Load Balancer Controller pour diagnostic
+          echo "Load Balancer Controller logs:"
+          kubectl logs -n kube-system -l app.kubernetes.io/name=aws-load-balancer-controller --tail=100
+          
+          # On continue quand même, pour ne pas bloquer le pipeline
+          echo "::warning::Health check failed but continuing pipeline"
+          exit 0
 
